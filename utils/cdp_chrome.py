@@ -97,10 +97,35 @@ class ChromeCDP:
             raise RuntimeError("No tabs available")
 
         ws_url = self.tabs[0]["webSocketDebuggerUrl"]
-        self.ws = websocket.create_connection(ws_url, timeout=10)
+        # timeout=None → không bị ngắt kết nối khi pause lâu giữa các command
+        self.ws = websocket.create_connection(ws_url, timeout=None)
+        self._ws_url = ws_url  # lưu lại để reconnect khi cần
+
+    def _reconnect_websocket(self):
+        """Reconnect lại WebSocket khi bị ngắt kết nối."""
+        print(f"🔄 WebSocket disconnected, reconnecting on {self.serial}...")
+        try:
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+            # Lấy ws_url mới nhất từ /json (tab có thể đã đổi)
+            try:
+                response = requests.get(f"http://localhost:{self.debug_port}/json", timeout=5)
+                tabs = response.json()
+                page_tabs = [t for t in tabs if t.get("type") == "page"]
+                ws_url = page_tabs[0]["webSocketDebuggerUrl"] if page_tabs else self._ws_url
+            except Exception:
+                ws_url = self._ws_url
+            self.ws = websocket.create_connection(ws_url, timeout=None)
+            self._ws_url = ws_url
+            print(f"✅ WebSocket reconnected on {self.serial}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to reconnect WebSocket on {self.serial}: {e}")
 
     def _send_command(self, method: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Gửi CDP command và nhận response."""
+        """Gửi CDP command và nhận response. Tự reconnect nếu kết nối bị đứt."""
         if not self.ws:
             raise RuntimeError("WebSocket not connected")
 
@@ -110,16 +135,28 @@ class ChromeCDP:
             "params": params or {}
         }
 
-        self.ws.send(json.dumps(cmd))
-        self.msg_id += 1
+        for attempt in range(3):
+            try:
+                self.ws.send(json.dumps(cmd))
+                self.msg_id += 1
 
-        # Nhận response
-        while True:
-            response = json.loads(self.ws.recv())
-            if "id" in response and response["id"] == cmd["id"]:
-                if "error" in response:
-                    raise RuntimeError(f"CDP error: {response['error']}")
-                return response.get("result", {})
+                # Nhận response
+                while True:
+                    response = json.loads(self.ws.recv())
+                    if "id" in response and response["id"] == cmd["id"]:
+                        if "error" in response:
+                            raise RuntimeError(f"CDP error: {response['error']}")
+                        return response.get("result", {})
+            except RuntimeError:
+                raise  # CDP error thật, không retry
+            except Exception as e:
+                if attempt < 2:
+                    print(f"⚠️  WebSocket error ({e}), attempt {attempt + 1}/3, reconnecting...")
+                    self._reconnect_websocket()
+                    # Reset msg_id về lại trước khi retry
+                    self.msg_id -= 1
+                else:
+                    raise RuntimeError(f"Connection timed out after 3 attempts: {e}")
 
     def navigate(self, url: str):
         """Navigate tới URL."""

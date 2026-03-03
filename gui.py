@@ -1,9 +1,8 @@
-import sys, os, subprocess, shutil
-from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QTableWidget, QTableWidgetItem, QHBoxLayout
+import sys, os, subprocess, shutil, json
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QTableWidget, QTableWidgetItem, QHBoxLayout, QDialog, QLineEdit, QLabel, QDialogButtonBox, QFormLayout
 from PySide6.QtCore import QTimer, QThread, Signal, Qt
 from PySide6.QtGui import QIcon
 
-# Đảm bảo adb và scrcpy luôn tìm được dù PATH của session chưa được update
 _ANDROID_TOOLS_PATHS = [
     r"C:\android-tools\platform-tools",
     r"C:\android-tools\scrcpy-win64-v3.3.4",
@@ -15,7 +14,10 @@ for _p in _ANDROID_TOOLS_PATHS:
 _si = subprocess.STARTUPINFO()
 _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 from helpers.csv import CSVHelper
-from main import setup_adb_keyboard, install_chrome, open_url_in_chrome, run_ads_automation
+from utils.adb import setup_adb_keyboard
+from features.chrome import install_chrome, open_url_in_chrome
+from features.ads import run_ads_automation
+from features.ads import AdsTableWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -100,7 +102,8 @@ class Worker(QThread):
 
             try:
                 self.progress.emit(f'🤖 Running ads automation on: {serial}')
-                result = run_ads_automation(serial, ads_link)
+                result = run_ads_automation(serial, ads_link,
+                                            human_settings=self.settings.get("human", {}))
                 title = result.get('title', '') if isinstance(result, dict) else str(result)
                 domain = result.get('domain', '') if isinstance(result, dict) else ''
                 ads_info = f"{title} | {domain}" if domain else title
@@ -118,6 +121,13 @@ class CookieLoaderGUI(QWidget):
         self.app_name = "Adbflow"
         self.icon = "icon.png"
         self.data_csv = "data.csv"
+        self.settings_file = "settings.json"
+
+        # Default settings
+        self.preview_width = 400
+        self.preview_height = 800
+
+        self.load_settings()
         self.status_timer = QTimer()
         self.status_timer.setSingleShot(True)
         self.status_timer.timeout.connect(self.reset_window_title)
@@ -128,19 +138,24 @@ class CookieLoaderGUI(QWidget):
 
     def initUI(self):
         self.setWindowTitle(self.app_name)
-        self.setGeometry(300, 300, 800, 600)
+        self.setGeometry(300, 300, 900, 600)
         self.setWindowIcon(QIcon(self.icon))
 
         layout = QHBoxLayout()
+        layout.setSpacing(0)
+
+        # Create ads table first
+        self.ads_table = AdsTableWidget(self.data_csv)
+        self.ads_table.status_update.connect(self.update_status)
 
         # Left navigation panel
         left_panel = QWidget()
         left_layout = QVBoxLayout()
+        left_layout.setContentsMargins(0, 0, 0, 0)
         left_panel.setLayout(left_layout)
-        left_panel.setMaximumWidth(160)  # Set maximum width for navigation panel
 
         self.refresh_button = QPushButton('Refresh data')
-        self.refresh_button.clicked.connect(self.refresh_devices_and_csv)
+        self.refresh_button.clicked.connect(self.ads_table.refresh_devices_and_csv)
         left_layout.addWidget(self.refresh_button)
 
         self.setup_keyboard_button = QPushButton('Setup Keyboard')
@@ -168,27 +183,24 @@ class CookieLoaderGUI(QWidget):
         self.remote_button.clicked.connect(self.open_remote)
         left_layout.addWidget(self.remote_button)
 
-        # Add stretch to push buttons to top
+        # Add stretch to push main buttons to top
         left_layout.addStretch()
+
+        self.settings_button = QPushButton('⚙️ Settings')
+        self.settings_button.clicked.connect(self.open_settings)
+        left_layout.addWidget(self.settings_button)
 
         # Right content panel
         right_panel = QWidget()
         right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_panel.setLayout(right_layout)
 
-        self.table = QTableWidget()
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['Model', 'Serial', 'Ads Link', 'Ads Info'])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.itemChanged.connect(self.on_table_item_changed)
-        right_layout.addWidget(self.table)
+        right_layout.addWidget(self.ads_table)
 
         layout.addWidget(left_panel)
         layout.addWidget(right_panel)
         self.setLayout(layout)
-        self.refresh_table()
 
     def update_status(self, text):
         if text:
@@ -200,159 +212,12 @@ class CookieLoaderGUI(QWidget):
     def reset_window_title(self):
         self.setWindowTitle(self.app_name)
 
-    def get_devices_with_model(self):
-        try:
-            out = subprocess.check_output(
-                ["adb", "devices", "-l"],
-                text=True, startupinfo=_si, stderr=subprocess.DEVNULL
-            )
-            lines = out.strip().splitlines()[1:]
-
-            devices = []
-            for line in lines:
-                if "device" not in line:
-                    continue
-
-                parts = line.split()
-                serial = parts[0]
-
-                model = "UNKNOWN"
-                for p in parts:
-                    if p.startswith("model:"):
-                        model = p.split("model:")[1]
-                        break
-
-                devices.append({
-                    "serial": serial,
-                    "model": model,
-                    "raw": line
-                })
-
-            return devices
-        except Exception as e:
-            print(f"Error getting devices: {e}")
-            return []
-
-    def refresh_table(self):
-        try:
-            try:
-                rows = CSVHelper.read_csv(self.data_csv)
-            except FileNotFoundError:
-                rows = []
-
-            num_rows = len(rows)
-            if num_rows == 0:
-                self.table.setRowCount(0)
-                self.update_status('No data in CSV found')
-                return
-
-            self.table.blockSignals(True)
-            self.table.setRowCount(num_rows)
-            self.table.setColumnCount(4)
-
-            for row_idx in range(num_rows):
-                model = rows[row_idx][0] if len(rows[row_idx]) > 0 else ""
-                serial = rows[row_idx][1] if len(rows[row_idx]) > 1 else ""
-                ads_link = rows[row_idx][2] if len(rows[row_idx]) > 2 else ""
-                ads_info = rows[row_idx][3] if len(rows[row_idx]) > 3 else ""
-
-                model_item = QTableWidgetItem(model)
-                serial_item = QTableWidgetItem(serial)
-                ads_item = QTableWidgetItem(ads_link)
-                ads_info_item = QTableWidgetItem(ads_info)
-
-                # Model, Serial và Ads Info không cho edit trực tiếp
-                non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-                model_item.setFlags(non_editable)
-                serial_item.setFlags(non_editable)
-                ads_info_item.setFlags(non_editable)
-
-                self.table.setItem(row_idx, 0, model_item)
-                self.table.setItem(row_idx, 1, serial_item)
-                self.table.setItem(row_idx, 2, ads_item)
-                self.table.setItem(row_idx, 3, ads_info_item)
-
-            self.table.resizeColumnsToContents()
-            self.table.blockSignals(False)
-
-            self.update_status(f'Loaded {len(rows)} rows from CSV')
-
-        except Exception as e:
-            self.update_status(f'Error refreshing table: {str(e)}')
-            print(f"Error details: {e}")
-
-    def refresh_devices_and_csv(self):
-        try:
-            devices = self.get_devices_with_model()
-
-            # Đọc ads_link cũ từ CSV (nếu có) để giữ lại khi refresh
-            try:
-                existing = CSVHelper.read_csv(self.data_csv)
-                existing_links = {row[1]: row[2] for row in existing if len(row) > 2}
-                existing_info = {row[1]: row[3] for row in existing if len(row) > 3}
-            except Exception:
-                existing_links = {}
-                existing_info = {}
-
-            rows = []
-            for device in devices:
-                serial = device["serial"]
-                ads_link = existing_links.get(serial, "")
-                ads_info = existing_info.get(serial, "")
-                rows.append([device["model"], serial, ads_link, ads_info])
-
-            CSVHelper.write_csv(self.data_csv, rows)
-
-            self.refresh_table()
-            self.update_status(f'Updated with {len(devices)} devices')
-
-        except Exception as e:
-            self.update_status(f'Error refreshing devices: {str(e)}')
-            print(f"Error details: {e}")
-
-    def on_table_item_changed(self, item):
-        """Lưu CSV mỗi khi user chỉnh sửa ô Ads Link."""
-        if item.column() != 2:
-            return
-        try:
-            rows = []
-            for row_idx in range(self.table.rowCount()):
-                model = self.table.item(row_idx, 0)
-                serial = self.table.item(row_idx, 1)
-                ads = self.table.item(row_idx, 2)
-                ads_info = self.table.item(row_idx, 3)
-                rows.append([
-                    model.text() if model else "",
-                    serial.text() if serial else "",
-                    ads.text() if ads else "",
-                    ads_info.text() if ads_info else "",
-                ])
-            CSVHelper.write_csv(self.data_csv, rows)
-        except Exception as e:
-            print(f"Error saving ads link: {e}")
-
-    def on_row_result(self, row_idx: int, ads_info: str):
-        """Cập nhật cột Ads Info khi một device chạy xong."""
-        self.table.blockSignals(True)
-        item = QTableWidgetItem(ads_info)
-        non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        item.setFlags(non_editable)
-        self.table.setItem(row_idx, 3, item)
-        self.table.resizeColumnToContents(3)
-        self.table.blockSignals(False)
-        # Lưu CSV ngay
-        try:
-            rows = []
-            for r in range(self.table.rowCount()):
-                rows.append([
-                    self.table.item(r, 0).text() if self.table.item(r, 0) else "",
-                    self.table.item(r, 1).text() if self.table.item(r, 1) else "",
-                    self.table.item(r, 2).text() if self.table.item(r, 2) else "",
-                    self.table.item(r, 3).text() if self.table.item(r, 3) else "",
-                ])
-            CSVHelper.write_csv(self.data_csv, rows)
-        except Exception as e:
-            print(f"Error saving ads info: {e}")
+    def update_status(self, text):
+        if text:
+            self.setWindowTitle(f'{self.app_name} - {text}')
+            self.status_timer.start(5000)
+        else:
+            self.reset_window_title()
 
     def on_worker_finished(self, message):
         self.update_status(message)
@@ -367,6 +232,7 @@ class CookieLoaderGUI(QWidget):
         self.screen_on_button.setEnabled(False)
         self.screen_off_button.setEnabled(False)
         self.remote_button.setEnabled(False)
+        self.settings_button.setEnabled(False)
 
     def enable_buttons(self):
         self.refresh_button.setEnabled(True)
@@ -376,18 +242,14 @@ class CookieLoaderGUI(QWidget):
         self.screen_on_button.setEnabled(True)
         self.screen_off_button.setEnabled(True)
         self.remote_button.setEnabled(True)
+        self.settings_button.setEnabled(True)
 
     def install_chrome_for_all(self):
         if self.worker and self.worker.isRunning():
             self.update_status('Task already running')
             return
 
-        table_data = []
-        row_count = self.table.rowCount()
-        for row in range(row_count):
-            serial_item = self.table.item(row, 1)
-            serial = serial_item.text() if serial_item else ""
-            table_data.append({'serial': serial})
+        table_data = self.ads_table.get_table_data()
 
         self.disable_buttons()
 
@@ -401,21 +263,15 @@ class CookieLoaderGUI(QWidget):
             self.update_status('Task already running')
             return
 
-        table_data = []
-        row_count = self.table.rowCount()
-        for row in range(row_count):
-            serial_item = self.table.item(row, 1)
-            ads_item = self.table.item(row, 2)
-            serial = serial_item.text() if serial_item else ""
-            ads_link = ads_item.text() if ads_item else ""
-            table_data.append({'serial': serial, 'ads_link': ads_link, 'row_index': row})
+        table_data = self.ads_table.get_table_data()
+        human_settings = self.ads_table.get_human_settings()
 
         self.disable_buttons()
 
-        self.worker = Worker("run_ads", table_data)
+        self.worker = Worker("run_ads", table_data, settings={"human": human_settings})
         self.worker.progress.connect(self.update_status)
         self.worker.finished.connect(self.on_worker_finished)
-        self.worker.row_result.connect(self.on_row_result)
+        self.worker.row_result.connect(self.ads_table.on_row_result)
         self.worker.start()
 
     def setup_keyboard_for_all(self):
@@ -423,14 +279,7 @@ class CookieLoaderGUI(QWidget):
             self.update_status('Task already running')
             return
 
-        table_data = []
-        row_count = self.table.rowCount()
-        for row in range(row_count):
-            serial_item = self.table.item(row, 1)
-            serial = serial_item.text() if serial_item else ""
-            table_data.append({
-                'serial': serial
-            })
+        table_data = self.ads_table.get_table_data()
 
         self.disable_buttons()
 
@@ -493,21 +342,74 @@ class CookieLoaderGUI(QWidget):
         self.update_status(f'Screen OFF done: {success}/{len(serials)} devices')
 
     def _collect_serials(self):
-        serials = []
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
-            serial = item.text().strip() if item else ""
-            if serial:
-                serials.append(serial)
-        return serials
+        table_data = self.ads_table.get_table_data()
+        return [row['serial'] for row in table_data if row['serial']]
+
+    def load_settings(self):
+        """Load settings from JSON file."""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    self.preview_width = settings.get('preview_width', 400)
+                    self.preview_height = settings.get('preview_height', 800)
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+
+    def save_settings(self):
+        """Save settings to JSON file."""
+        try:
+            settings = {
+                'preview_width': self.preview_width,
+                'preview_height': self.preview_height
+            }
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
+    def open_settings(self):
+        """Open settings dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.setModal(True)
+
+        layout = QFormLayout()
+
+        # Width input
+        width_label = QLabel("Preview Width:")
+        self.width_input = QLineEdit(str(self.preview_width))
+        layout.addRow(width_label, self.width_input)
+
+        # Height input
+        height_label = QLabel("Preview Height:")
+        self.height_input = QLineEdit(str(self.preview_height))
+        layout.addRow(height_label, self.height_input)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        dialog.setLayout(layout)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                self.preview_width = int(self.width_input.text())
+                self.preview_height = int(self.height_input.text())
+                self.save_settings()
+                self.update_status('Settings saved')
+            except ValueError:
+                self.update_status('Invalid width or height values')
 
     def open_remote(self):
         """Mở scrcpy cho device đang được chọn, hoặc tất cả nếu không chọn gì."""
-        selected_rows = self.table.selectionModel().selectedRows()
+        selected_rows = self.ads_table.table.selectionModel().selectedRows()
         if selected_rows:
             serials = []
             for index in selected_rows:
-                item = self.table.item(index.row(), 1)
+                item = self.ads_table.table.item(index.row(), 1)
                 serial = item.text().strip() if item else ""
                 if serial:
                     serials.append(serial)
@@ -521,7 +423,6 @@ class CookieLoaderGUI(QWidget):
         launched = 0
         for serial in serials:
             try:
-                # Tìm scrcpy: thử PATH trước, fallback về thư mục cài đặt cố định
                 scrcpy_exe = (
                     shutil.which("scrcpy")
                     or r"C:\android-tools\scrcpy-win64-v3.3.4\scrcpy.exe"
@@ -529,9 +430,10 @@ class CookieLoaderGUI(QWidget):
                 if not os.path.isfile(scrcpy_exe) and scrcpy_exe != "scrcpy":
                     raise FileNotFoundError(f"scrcpy not found at: {scrcpy_exe}")
 
-                # KHÔNG dùng _si ở đây — scrcpy cần hiện cửa sổ GUI
                 subprocess.Popen(
-                    [scrcpy_exe, "-s", serial, "--window-title", serial],
+                    [scrcpy_exe, "-s", serial, "--window-title", serial,
+                     "--window-width", str(self.preview_width),
+                     "--window-height", str(self.preview_height)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
