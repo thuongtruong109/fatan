@@ -171,7 +171,7 @@ def run_ads_automation(
 
 # GUI Components for Ads Management
 import sys, os, subprocess, shutil, json
-from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QTableWidget, QTableWidgetItem, QHBoxLayout, QDialog, QLineEdit, QLabel, QDialogButtonBox, QFormLayout, QStyledItemDelegate, QTextEdit, QSizePolicy, QGroupBox, QDoubleSpinBox, QSpinBox, QSlider, QFrame, QComboBox
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QTableWidget, QTableWidgetItem, QHBoxLayout, QDialog, QLineEdit, QLabel, QDialogButtonBox, QFormLayout, QStyledItemDelegate, QTextEdit, QSizePolicy, QGroupBox, QDoubleSpinBox, QSpinBox, QSlider, QFrame, QComboBox, QGridLayout
 from PySide6.QtCore import QTimer, QThread, Signal, Qt, QRect
 from PySide6.QtGui import QIcon
 
@@ -323,7 +323,6 @@ class AdsTableWidget(QWidget):
     """Widget containing the ads table with device management functionality."""
 
     status_update = Signal(str)
-    ads_link_changed = Signal(int, str)  # Signal for ads link changes (row_idx, new_link)
 
     def __init__(self, data_csv="data.csv", parent=None):
         super().__init__(parent)
@@ -339,8 +338,9 @@ class AdsTableWidget(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['Model', 'Serial', 'Ads Link', 'Ads Info'])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(['No', 'Model', 'Serial', 'Device Name', 'Proxy Type', 'Host:Port'])
+        self.table.verticalHeader().hide()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
@@ -348,9 +348,11 @@ class AdsTableWidget(QWidget):
         self.table.focusOutEvent = self.table_focus_out_event
         self.table.mouseDoubleClickEvent = self.table_mouse_double_click_event
 
-        # Dùng delegate riêng cho cột Serial để editor không bị tràn ra ngoài ô
+        # Dùng delegate riêng cho cột Serial / Device Name để editor không bị tràn ra ngoài ô
         self._serial_delegate = SerialDelegate(self.table)
-        self.table.setItemDelegateForColumn(1, self._serial_delegate)
+        self.table.setItemDelegateForColumn(2, self._serial_delegate)
+        self._device_name_delegate = SerialDelegate(self.table)
+        self.table.setItemDelegateForColumn(3, self._device_name_delegate)
 
         # Remove cell hover effect but keep row selection, make header text bolder
         self.table.setStyleSheet("""
@@ -394,272 +396,327 @@ class AdsTableWidget(QWidget):
         layout.addWidget(self.table)
 
         # ── Like Human Settings Section ──────────────────────────────────
-        self._build_human_settings_section(layout)
+        self._human_settings_group = self._build_human_settings_section(layout)
 
         self.refresh_table()
 
     def _build_human_settings_section(self, parent_layout: QVBoxLayout):
         """Tạo section 'Like Human Behavior' bên dưới table."""
-        group = QGroupBox("🤖 Like Human Behavior")
+        group = QGroupBox("🤖 Behaviors")
         group.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
                 font-size: 12px;
-                border: 1px solid #ccc;
-                border-radius: 6px;
+                border: 1px solid #c5cae9;
+                border-radius: 8px;
                 margin-top: 6px;
                 padding-top: 4px;
-                background-color: #fafafa;
+                background-color: #f5f7ff;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 4px;
-                color: #333;
+                padding: 0 6px;
+                color: #1565c0;
             }
         """)
 
-        grid = QHBoxLayout()
-        grid.setSpacing(16)
-        grid.setContentsMargins(10, 6, 10, 8)
+        grid = QGridLayout()
+        grid.setSpacing(0)
+        grid.setContentsMargins(10, 8, 10, 10)
 
-        # ── Cột 1: Duration & Read Pause ────────────────────────────────
-        col1 = QVBoxLayout()
-        col1.setSpacing(4)
-        col1_title = QLabel("⏱ Duration (s)")
-        col1_title.setStyleSheet("font-weight: bold; color: #555;")
-        col1.addWidget(col1_title)
+        # Shared style for all spinboxes, combos and slider-value labels
+        _SPIN_W = 72   # fixed width for every spin-box
+        _LABEL_W = 90  # fixed width for every row label
 
-        dur_row = QHBoxLayout()
-        dur_row.addWidget(QLabel("Min:"))
-        self._hs_min_dur = QSpinBox()
-        self._hs_min_dur.setRange(10, 600)
-        self._hs_min_dur.setValue(60)
-        self._hs_min_dur.setSuffix("s")
-        self._hs_min_dur.setToolTip("Thời gian tối thiểu mỗi phiên lướt")
-        dur_row.addWidget(self._hs_min_dur)
-        dur_row.addWidget(QLabel("Max:"))
-        self._hs_max_dur = QSpinBox()
-        self._hs_max_dur.setRange(10, 600)
-        self._hs_max_dur.setValue(90)
-        self._hs_max_dur.setSuffix("s")
-        self._hs_max_dur.setToolTip("Thời gian tối đa mỗi phiên lướt")
-        dur_row.addWidget(self._hs_max_dur)
-        col1.addLayout(dur_row)
-
-        read_row = QHBoxLayout()
-        read_row.addWidget(QLabel("Read min:"))
-        self._hs_read_min = QDoubleSpinBox()
-        self._hs_read_min.setRange(0.5, 30.0)
-        self._hs_read_min.setValue(1.5)
-        self._hs_read_min.setSuffix("s")
-        self._hs_read_min.setSingleStep(0.5)
-        self._hs_read_min.setToolTip("Thời gian dừng đọc tối thiểu")
-        read_row.addWidget(self._hs_read_min)
-        read_row.addWidget(QLabel("max:"))
-        self._hs_read_max = QDoubleSpinBox()
-        self._hs_read_max.setRange(0.5, 60.0)
-        self._hs_read_max.setValue(6.0)
-        self._hs_read_max.setSuffix("s")
-        self._hs_read_max.setSingleStep(0.5)
-        self._hs_read_max.setToolTip("Thời gian dừng đọc tối đa")
-        read_row.addWidget(self._hs_read_max)
-        col1.addLayout(read_row)
-        grid.addLayout(col1)
-
-        # ── Separator ────────────────────────────────────────────────────
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.Shape.VLine)
-        sep1.setStyleSheet("color: #ddd;")
-        grid.addWidget(sep1)
-
-        # ── Cột 2: Scroll Distance & Focus ──────────────────────────────
-        col2 = QVBoxLayout()
-        col2.setSpacing(4)
-        col2_title = QLabel("� Scroll Distance & Focus")
-        col2_title.setStyleSheet("font-weight: bold; color: #555;")
-        col2.addWidget(col2_title)
-
-        sdist_row = QHBoxLayout()
-        sdist_row.addWidget(QLabel("Min:"))
-        self._hs_scroll_min = QSpinBox()
-        self._hs_scroll_min.setRange(50, 3000)
-        self._hs_scroll_min.setValue(500)
-        self._hs_scroll_min.setSuffix("px")
-        self._hs_scroll_min.setSingleStep(50)
-        self._hs_scroll_min.setToolTip("Khoảng cách scroll tối thiểu mỗi lần (px vật lý). 1080p ≈ 500–800")
-        sdist_row.addWidget(self._hs_scroll_min)
-        sdist_row.addWidget(QLabel("Max:"))
-        self._hs_scroll_max = QSpinBox()
-        self._hs_scroll_max.setRange(100, 4000)
-        self._hs_scroll_max.setValue(1400)
-        self._hs_scroll_max.setSuffix("px")
-        self._hs_scroll_max.setSingleStep(50)
-        self._hs_scroll_max.setToolTip("Khoảng cách scroll tối đa. 1080p ≈ 1200–1800")
-        sdist_row.addWidget(self._hs_scroll_max)
-        col2.addLayout(sdist_row)
-
-        focus_row = QHBoxLayout()
-        focus_row.addWidget(QLabel("Scroll focus:"))
-        self._hs_scroll_focus = QSlider(Qt.Orientation.Horizontal)
-        self._hs_scroll_focus.setRange(5, 30)   # maps to 0.5–3.0
-        self._hs_scroll_focus.setValue(10)       # default 1.0
-        self._hs_scroll_focus.setFixedWidth(90)
-        self._hs_scroll_focus.setToolTip(
-            "Tăng độ ưu tiên scroll so với click.\n"
-            "1.0 = cân bằng  |  2.0 = scroll nhiều gấp đôi  |  3.0 = gần như chỉ scroll"
+        _input_ss = (
+            "QSpinBox, QDoubleSpinBox, QComboBox {"
+            "  border: 1px solid #bdbdbd;"
+            "  border-radius: 4px;"
+            "  padding: 2px 6px;"
+            "  background: #ffffff;"
+            "  color: #212121;"
+            "  font-size: 11px;"
+            "  min-height: 24px;"
+            "  max-height: 28px;"
+            "}"
+            "QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {"
+            "  border: 1px solid #1976d2;"
+            "}"
+            "QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {"
+            "  background: #f5f5f5; color: #9e9e9e;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button,"
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
+            "  width: 16px;"
+            "  border: none;"
+            "  background: transparent;"
+            "}"
+            "QComboBox::drop-down {"
+            "  border: none; width: 20px;"
+            "}"
+            "QSlider::groove:horizontal {"
+            "  height: 4px;"
+            "  background: #e0e0e0;"
+            "  border-radius: 2px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  width: 14px; height: 14px;"
+            "  background: #1976d2;"
+            "  border-radius: 7px;"
+            "  margin: -5px 0;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  background: #90caf9;"
+            "  border-radius: 2px;"
+            "}"
         )
-        self._hs_scroll_focus_label = QLabel("1.0×")
-        self._hs_scroll_focus_label.setFixedWidth(32)
+
+        def _header(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "font-weight: bold; color: #1565c0; font-size: 11px;"
+                " padding-bottom: 4px; background: transparent; border: none;"
+            )
+            return lbl
+
+        def _row_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFixedWidth(_LABEL_W)
+            lbl.setStyleSheet("color: #555; font-size: 11px; background: transparent; border: none;")
+            return lbl
+
+        def _value_label(text: str, width: int = 36) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFixedWidth(width)
+            lbl.setStyleSheet("color: #1976d2; font-weight: bold; font-size: 11px; background: transparent; border: none;")
+            return lbl
+
+        def _spin(parent, attr, vmin, vmax, val, suffix="", step=1, special="", tip=""):
+            s = QSpinBox()
+            s.setRange(vmin, vmax)
+            s.setValue(val)
+            s.setFixedWidth(_SPIN_W)
+            s.setSingleStep(step)
+            if suffix: s.setSuffix(suffix)
+            if special: s.setSpecialValueText(special)
+            if tip: s.setToolTip(tip)
+            s.setStyleSheet(_input_ss)
+            setattr(parent, attr, s)
+            return s
+
+        def _dspin(parent, attr, vmin, vmax, val, suffix="", step=0.5, tip=""):
+            s = QDoubleSpinBox()
+            s.setRange(vmin, vmax)
+            s.setValue(val)
+            s.setFixedWidth(_SPIN_W)
+            s.setSingleStep(step)
+            if suffix: s.setSuffix(suffix)
+            if tip: s.setToolTip(tip)
+            s.setStyleSheet(_input_ss)
+            setattr(parent, attr, s)
+            return s
+
+        def _slider(parent, attr, vmin, vmax, val, tip=""):
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(vmin, vmax)
+            s.setValue(val)
+            s.setMinimumWidth(80)
+            if tip: s.setToolTip(tip)
+            s.setStyleSheet(_input_ss)
+            setattr(parent, attr, s)
+            return s
+
+        def _sep() -> QFrame:
+            """Thin horizontal separator line."""
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setStyleSheet("color: #e0e0e0; margin: 2px 0; background: transparent; border: none;")
+            return line
+
+        def _cell_widget(rows_content) -> QWidget:
+            """Build a uniform cell widget from a list of QHBoxLayout / QWidget rows."""
+            w = QWidget()
+            # Use objectName-scoped style so it doesn't bleed into child input widgets
+            w.setObjectName("behaviorCell")
+            w.setStyleSheet(
+                "#behaviorCell {"
+                "  background: #f8f9ff;"
+                "  border: 1px solid #e3e8f0;"
+                "  border-radius: 6px;"
+                "}"
+            )
+            vl = QVBoxLayout(w)
+            vl.setContentsMargins(10, 8, 10, 10)
+            vl.setSpacing(6)
+            for item in rows_content:
+                if isinstance(item, QHBoxLayout):
+                    vl.addLayout(item)
+                else:
+                    vl.addWidget(item)
+            vl.addStretch()
+            return w
+
+        def _hrow(*widgets) -> QHBoxLayout:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            row.setContentsMargins(0, 0, 0, 0)
+            for w in widgets:
+                row.addWidget(w)
+            return row
+
+        # ── Cell (0,0): ⏱ Duration & Read Pause ──────────────────────────
+        self._hs_min_dur  = _spin(self, "_hs_min_dur",  10, 600, 60,  "s", tip="Min session duration")
+        self._hs_max_dur  = _spin(self, "_hs_max_dur",  10, 600, 90,  "s", tip="Max session duration")
+        self._hs_read_min = _dspin(self, "_hs_read_min", 0.5, 30.0, 1.5, "s", tip="Min read pause")
+        self._hs_read_max = _dspin(self, "_hs_read_max", 0.5, 60.0, 6.0, "s", tip="Max read pause")
+
+        duration_row = QHBoxLayout()
+        duration_row.setSpacing(6)
+        duration_row.setContentsMargins(0, 0, 0, 0)
+        duration_row.addWidget(_row_label("Duration:"))
+        duration_row.addWidget(self._hs_min_dur)
+        duration_row.addWidget(QLabel("-"))
+        duration_row.addWidget(self._hs_max_dur)
+        duration_row.addStretch()
+
+        read_pause_row = QHBoxLayout()
+        read_pause_row.setSpacing(6)
+        read_pause_row.setContentsMargins(0, 0, 0, 0)
+        read_pause_row.addWidget(_row_label("Read pause:"))
+        read_pause_row.addWidget(self._hs_read_min)
+        read_pause_row.addWidget(QLabel("-"))
+        read_pause_row.addWidget(self._hs_read_max)
+        read_pause_row.addStretch()
+
+        c00 = _cell_widget([
+            _header("⏱ Duration & Read Pause"),
+            duration_row,
+            _sep(),
+            read_pause_row,
+        ])
+
+        # ── Cell (0,1): 🖱 Scroll Distance & Focus ───────────────────────
+        self._hs_scroll_min   = _spin(self, "_hs_scroll_min",   50, 3000, 500,  "px", step=50, tip="Min scroll distance")
+        self._hs_scroll_max   = _spin(self, "_hs_scroll_max",  100, 4000, 1400, "px", step=50, tip="Max scroll distance")
+        self._hs_scroll_focus = _slider(self, "_hs_scroll_focus", 5, 30, 10,
+            "Scroll focus weight (1.0× = balanced, 3.0× = scroll only)")
+        self._hs_scroll_focus_label = _value_label("1.0×", 36)
         self._hs_scroll_focus.valueChanged.connect(
             lambda v: self._hs_scroll_focus_label.setText(f"{v/10:.1f}×")
         )
-        focus_row.addWidget(self._hs_scroll_focus)
-        focus_row.addWidget(self._hs_scroll_focus_label)
-        col2.addLayout(focus_row)
-
-        overshoot_row = QHBoxLayout()
-        overshoot_row.addWidget(QLabel("Overshoot %:"))
-        self._hs_overshoot = QSlider(Qt.Orientation.Horizontal)
-        self._hs_overshoot.setRange(0, 60)
-        self._hs_overshoot.setValue(20)
-        self._hs_overshoot.setFixedWidth(90)
-        self._hs_overshoot.setToolTip(
-            "Xác suất scroll vượt đích rồi kéo lại (tự nhiên hơn)\n"
-            "0% = không overshoot  |  60% = rất hay overshoot"
-        )
-        self._hs_overshoot_label = QLabel("20%")
-        self._hs_overshoot_label.setFixedWidth(32)
+        self._hs_overshoot       = _slider(self, "_hs_overshoot", 0, 60, 20, "Overshoot probability")
+        self._hs_overshoot_label = _value_label("20%", 36)
         self._hs_overshoot.valueChanged.connect(
             lambda v: self._hs_overshoot_label.setText(f"{v}%")
         )
-        overshoot_row.addWidget(self._hs_overshoot)
-        overshoot_row.addWidget(self._hs_overshoot_label)
-        col2.addLayout(overshoot_row)
-        grid.addLayout(col2)
 
-        # ── Separator ────────────────────────────────────────────────────
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.VLine)
-        sep2.setStyleSheet("color: #ddd;")
-        grid.addWidget(sep2)
+        focus_row = QHBoxLayout(); focus_row.setSpacing(6); focus_row.setContentsMargins(0,0,0,0)
+        focus_row.addWidget(_row_label("Scroll focus:"))
+        focus_row.addWidget(self._hs_scroll_focus, 1)
+        focus_row.addWidget(self._hs_scroll_focus_label)
 
-        # ── Cột 3: Swipe Speed & Style ───────────────────────────────────
-        col3 = QVBoxLayout()
-        col3.setSpacing(4)
-        col3_title = QLabel("⚡ Swipe Speed & Style")
-        col3_title.setStyleSheet("font-weight: bold; color: #555;")
-        col3.addWidget(col3_title)
+        over_row = QHBoxLayout(); over_row.setSpacing(6); over_row.setContentsMargins(0,0,0,0)
+        over_row.addWidget(_row_label("Overshoot:"))
+        over_row.addWidget(self._hs_overshoot, 1)
+        over_row.addWidget(self._hs_overshoot_label)
 
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("Min ms:"))
-        self._hs_speed_min = QSpinBox()
-        self._hs_speed_min.setRange(50, 2000)
-        self._hs_speed_min.setValue(0)
-        self._hs_speed_min.setSpecialValueText("Auto")
-        self._hs_speed_min.setSuffix("ms")
-        self._hs_speed_min.setSingleStep(20)
-        self._hs_speed_min.setToolTip(
-            "Thời gian ngắn nhất của 1 lần swipe (0 = tự động theo profile).\n"
-            "Nhỏ = nhanh; lớn = chậm, cẩn thận hơn."
-        )
-        speed_row.addWidget(self._hs_speed_min)
-        speed_row.addWidget(QLabel("Max:"))
-        self._hs_speed_max = QSpinBox()
-        self._hs_speed_max.setRange(50, 3000)
-        self._hs_speed_max.setValue(0)
-        self._hs_speed_max.setSpecialValueText("Auto")
-        self._hs_speed_max.setSuffix("ms")
-        self._hs_speed_max.setSingleStep(20)
-        self._hs_speed_max.setToolTip("Thời gian dài nhất của 1 lần swipe (0 = tự động)")
-        speed_row.addWidget(self._hs_speed_max)
-        col3.addLayout(speed_row)
+        scroll_distance_row = QHBoxLayout()
+        scroll_distance_row.setSpacing(6)
+        scroll_distance_row.setContentsMargins(0, 0, 0, 0)
+        scroll_distance_row.addWidget(_row_label("Scroll dist:"))
+        scroll_distance_row.addWidget(self._hs_scroll_min)
+        scroll_distance_row.addWidget(QLabel("-"))
+        scroll_distance_row.addWidget(self._hs_scroll_max)
+        scroll_distance_row.addStretch()
 
-        style_row = QHBoxLayout()
-        style_row.addWidget(QLabel("Scroll style:"))
+        c01 = _cell_widget([
+            _header("🖱 Scroll Distance & Focus"),
+            scroll_distance_row,
+            _sep(),
+            focus_row,
+            over_row,
+        ])
+
+        # ── Cell (1,0): ⚡ Swipe Speed & Style ──────────────────────────
+        self._hs_speed_min = _spin(self, "_hs_speed_min", 0, 2000, 0, "ms", step=20,
+            special="Auto", tip="Min swipe duration (0 = auto)")
+        self._hs_speed_max = _spin(self, "_hs_speed_max", 0, 3000, 0, "ms", step=20,
+            special="Auto", tip="Max swipe duration (0 = auto)")
         self._hs_scroll_style = QComboBox()
         self._hs_scroll_style.addItems([
-            "Mixed (auto)",
-            "Normal (Bezier)",
-            "Flash (fast flick)",
-            "Zigzag (drift)",
-            "Stutter (hesitant)",
+            "Mixed (auto)", "Normal (Bezier)", "Flash (fast flick)",
+            "Zigzag (drift)", "Stutter (hesitant)",
         ])
-        self._hs_scroll_style.setCurrentIndex(0)
+        self._hs_scroll_style.setStyleSheet(_input_ss)
         self._hs_scroll_style.setToolTip(
-            "Mixed = tự chọn ngẫu nhiên (tự nhiên nhất)\n"
-            "Normal = Bezier cong, giống ngón tay thật\n"
-            "Flash = vuốt nhanh liên tục\n"
-            "Zigzag = kéo lệch sang hai bên\n"
-            "Stutter = dừng ngắn giữa chừng"
+            "Mixed = random (most natural)\nNormal = Bezier\n"
+            "Flash = fast flick\nZigzag = drift\nStutter = hesitant"
         )
-        style_row.addWidget(self._hs_scroll_style)
-        col3.addLayout(style_row)
-        grid.addLayout(col3)
 
-        # ── Separator ────────────────────────────────────────────────────
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.Shape.VLine)
-        sep3.setStyleSheet("color: #ddd;")
-        grid.addWidget(sep3)
-
-        # ── Cột 4: Click, Burst & Profile ───────────────────────────────
-        col4 = QVBoxLayout()
-        col4.setSpacing(4)
-        col4_title = QLabel("👆 Click & Profile")
-        col4_title.setStyleSheet("font-weight: bold; color: #555;")
-        col4.addWidget(col4_title)
-
-        click_row = QHBoxLayout()
-        click_row.addWidget(QLabel("Click %:"))
-        self._hs_click_prob = QSlider(Qt.Orientation.Horizontal)
-        self._hs_click_prob.setRange(5, 80)
-        self._hs_click_prob.setValue(30)
-        self._hs_click_prob.setFixedWidth(90)
-        self._hs_click_prob.setToolTip("Xác suất click vào element (cao = click nhiều hơn)")
-        self._hs_click_label = QLabel("30%")
-        self._hs_click_label.setFixedWidth(36)
-        self._hs_click_prob.valueChanged.connect(lambda v: self._hs_click_label.setText(f"{v}%"))
-        click_row.addWidget(self._hs_click_prob)
-        click_row.addWidget(self._hs_click_label)
-        col4.addLayout(click_row)
-
-        burst_row = QHBoxLayout()
-        burst_row.addWidget(QLabel("Burst %:"))
-        self._hs_burst_prob = QSlider(Qt.Orientation.Horizontal)
-        self._hs_burst_prob.setRange(5, 80)
-        self._hs_burst_prob.setValue(35)
-        self._hs_burst_prob.setFixedWidth(90)
-        self._hs_burst_prob.setToolTip("Xác suất burst scroll liên tiếp nhiều lần")
-        self._hs_burst_label = QLabel("35%")
-        self._hs_burst_label.setFixedWidth(36)
-        self._hs_burst_prob.valueChanged.connect(lambda v: self._hs_burst_label.setText(f"{v}%"))
-        burst_row.addWidget(self._hs_burst_prob)
-        burst_row.addWidget(self._hs_burst_label)
-        col4.addLayout(burst_row)
-
-        profile_row = QHBoxLayout()
-        profile_row.addWidget(QLabel("Profile:"))
-        self._hs_profile = QComboBox()
-        self._hs_profile.addItems([
-            "Auto (random)",
-            "Fast scroller",
-            "Careful reader",
-            "Distracted",
+        c10 = _cell_widget([
+            _header("⚡ Swipe Speed & Style"),
+            _hrow(_row_label("Speed:"), self._hs_speed_min, QLabel("-"), self._hs_speed_max),
+            _sep(),
+            _hrow(_row_label("Scroll style:"), self._hs_scroll_style),
         ])
-        self._hs_profile.setCurrentIndex(0)
+
+        # ── Cell (1,1): 👆 Click, Burst & Profile ───────────────────────
+        self._hs_click_prob  = _slider(self, "_hs_click_prob",  5, 80, 30, "Click probability")
+        self._hs_click_label = _value_label("30%", 36)
+        self._hs_click_prob.valueChanged.connect(lambda v: self._hs_click_label.setText(f"{v}%"))
+
+        self._hs_burst_prob  = _slider(self, "_hs_burst_prob",  5, 80, 35, "Burst scroll probability")
+        self._hs_burst_label = _value_label("35%", 36)
+        self._hs_burst_prob.valueChanged.connect(lambda v: self._hs_burst_label.setText(f"{v}%"))
+
+        self._hs_profile = QComboBox()
+        self._hs_profile.addItems(["Auto (random)", "Fast scroller", "Careful reader", "Distracted"])
+        self._hs_profile.setStyleSheet(_input_ss)
         self._hs_profile.setToolTip(
-            "Auto = chọn ngẫu nhiên mỗi session\n"
-            "Fast scroller = scroll nhanh, ít đọc\n"
-            "Careful reader = scroll chậm, dừng đọc nhiều\n"
-            "Distracted = không đều, thỉnh thoảng bỏ dở"
+            "Auto = random each session\nFast = quick scroll\n"
+            "Careful = slow, reads more\nDistracted = irregular"
         )
-        profile_row.addWidget(self._hs_profile)
-        col4.addLayout(profile_row)
-        grid.addLayout(col4)
+
+        click_row2 = QHBoxLayout(); click_row2.setSpacing(6); click_row2.setContentsMargins(0,0,0,0)
+        click_row2.addWidget(_row_label("Click %:"))
+        click_row2.addWidget(self._hs_click_prob, 1)
+        click_row2.addWidget(self._hs_click_label)
+
+        burst_row2 = QHBoxLayout(); burst_row2.setSpacing(6); burst_row2.setContentsMargins(0,0,0,0)
+        burst_row2.addWidget(_row_label("Burst %:"))
+        burst_row2.addWidget(self._hs_burst_prob, 1)
+        burst_row2.addWidget(self._hs_burst_label)
+
+        c11 = _cell_widget([
+            _header("👆 Click & Profile"),
+            click_row2,
+            burst_row2,
+            _sep(),
+            _hrow(_row_label("Profile:"), self._hs_profile),
+        ])
+
+        # Place cells with equal stretch so all 4 have same height
+        grid.addWidget(c00, 0, 0)
+        grid.addWidget(c01, 0, 1)
+        grid.addWidget(c10, 1, 0)
+        grid.addWidget(c11, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
 
         group.setLayout(grid)
         parent_layout.addWidget(group)
+        return group
+
+    def get_human_settings_widget(self) -> "QGroupBox":
+        """Return the 'Like Human Behavior' QGroupBox to embed anywhere."""
+        # The widgets (_hs_*) were already created in _build_human_settings_section
+        # during initUI.  We just need to return the stored reference.
+        return self._human_settings_group
 
     # ── Style key lookup ─────────────────────────────────────────────────
     _STYLE_MAP = {
@@ -747,39 +804,44 @@ class AdsTableWidget(QWidget):
 
             self.table.blockSignals(True)
             self.table.setRowCount(num_rows)
-            self.table.setColumnCount(4)
+            self.table.setColumnCount(6)
+
+            non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+            editable = non_editable | Qt.ItemFlag.ItemIsEditable
 
             for row_idx in range(num_rows):
                 model = rows[row_idx][0] if len(rows[row_idx]) > 0 else ""
                 serial = rows[row_idx][1] if len(rows[row_idx]) > 1 else ""
-                ads_link = rows[row_idx][2] if len(rows[row_idx]) > 2 else ""
-                ads_info = rows[row_idx][3] if len(rows[row_idx]) > 3 else ""
+                device_name = rows[row_idx][2] if len(rows[row_idx]) > 2 else ""
+
+                # col 0 – # (row number, read-only)
+                num_item = QTableWidgetItem(str(row_idx + 1))
+                num_item.setFlags(non_editable)
+                num_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 0, num_item)
 
                 model_item = QTableWidgetItem(model)
-                serial_item = QTableWidgetItem(serial)
-                ads_link_widget = AdsLinkWidget(ads_link)
-                ads_info_item = QTableWidgetItem(ads_info)
-
-                # Model và Ads Info không cho edit trực tiếp, Serial cho phép edit
-                non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
                 model_item.setFlags(non_editable)
-                # Serial column is now editable
-                serial_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
-                ads_info_item.setFlags(non_editable)
+                self.table.setItem(row_idx, 1, model_item)
 
-                self.table.setItem(row_idx, 0, model_item)
-                self.table.setItem(row_idx, 1, serial_item)
-                self.table.setCellWidget(row_idx, 2, ads_link_widget)  # Use setCellWidget for custom widget
-                ads_link_widget.link_changed.connect(lambda new_link, row=row_idx: self.on_ads_link_changed(row, new_link))
-                self.table.setItem(row_idx, 3, ads_info_item)
+                serial_item = QTableWidgetItem(serial)
+                serial_item.setFlags(editable)
+                self.table.setItem(row_idx, 2, serial_item)
 
+                device_name_item = QTableWidgetItem(device_name)
+                device_name_item.setFlags(editable)
+                self.table.setItem(row_idx, 3, device_name_item)
+
+                # Proxy cols — placeholder until updated externally
+                for col in (4, 5):
+                    ph = QTableWidgetItem("—")
+                    ph.setFlags(non_editable)
+                    ph.setForeground(Qt.GlobalColor.gray)
+                    self.table.setItem(row_idx, col, ph)
+
+            self.table.setColumnWidth(0, 32)
             self.table.resizeColumnsToContents()
-            # Set minimum width for ads link column to accommodate the buttons
-            if self.table.columnCount() > 2:
-                min_width = 200  # Minimum width to show truncated text + buttons
-                current_width = self.table.columnWidth(2)
-                if current_width < min_width:
-                    self.table.setColumnWidth(2, min_width)
+            self.table.setColumnWidth(0, 32)
             self.table.blockSignals(False)
 
             self.status_update.emit(f'Loaded {len(rows)} rows from CSV')
@@ -792,21 +854,18 @@ class AdsTableWidget(QWidget):
         try:
             devices = self.get_devices_with_model()
 
-            # Đọc ads_link cũ từ CSV (nếu có) để giữ lại khi refresh
+            # Đọc device_name cũ từ CSV (nếu có) để giữ lại khi refresh
             try:
                 existing = CSVHelper.read_csv(self.data_csv)
-                existing_links = {row[1]: row[2] for row in existing if len(row) > 2}
-                existing_info = {row[1]: row[3] for row in existing if len(row) > 3}
+                existing_names = {row[1]: row[2] for row in existing if len(row) > 2}
             except Exception:
-                existing_links = {}
-                existing_info = {}
+                existing_names = {}
 
             rows = []
             for device in devices:
                 serial = device["serial"]
-                ads_link = existing_links.get(serial, "")
-                ads_info = existing_info.get(serial, "")
-                rows.append([device["model"], serial, ads_link, ads_info])
+                device_name = existing_names.get(serial, "")
+                rows.append([device["model"], serial, device_name])
 
             CSVHelper.write_csv(self.data_csv, rows)
 
@@ -818,9 +877,8 @@ class AdsTableWidget(QWidget):
             print(f"Error details: {e}")
 
     def on_ads_link_changed(self, row_idx, new_link):
-        """Handle ads link changes from custom widget."""
-        self.ads_link_changed.emit(row_idx, new_link)
-        self.save_csv_changes()
+        """Kept for backward compatibility — no longer used."""
+        pass
 
     def on_selection_changed(self):
         """Clear focus when selection changes."""
@@ -844,66 +902,21 @@ class AdsTableWidget(QWidget):
 
     def table_mouse_double_click_event(self, event):
         """Handle double-click on table cells for inline editing."""
-        # Get the index at the double-click position
         index = self.table.indexAt(event.pos())
         if index.isValid():
             row = index.row()
             col = index.column()
 
-            if col == 1:  # Serial column
+            if col in (2, 3):  # Serial or Device Name column
                 item = self.table.item(row, col)
                 if item:
                     self.table.editItem(item)
-            elif col == 2:  # Ads link column
-                # Get the AdsLinkWidget and trigger inline editing
-                widget = self.table.cellWidget(row, col)
-                if isinstance(widget, AdsLinkWidget):
-                    widget.start_inline_edit()
-            elif col == 3:  # Ads Info column — mở modal xem full text
-                item = self.table.item(row, col)
-                full_text = item.text() if item else ""
-                self.show_ads_info_modal(full_text)
 
-        # Call parent event
         QTableWidget.mouseDoubleClickEvent(self.table, event)
 
-    def show_ads_info_modal(self, text: str):
-        """Mở dialog hiển thị đầy đủ nội dung Ads Info."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Ads Info")
-        dialog.setModal(True)
-        dialog.resize(520, 320)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        text_edit = QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setPlainText(text if text else "(Chưa có thông tin)")
-        text_edit.setStyleSheet("""
-            QTextEdit {
-                font-size: 13px;
-                padding: 6px;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: #fafafa;
-            }
-        """)
-        layout.addWidget(text_edit)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btn_box.rejected.connect(dialog.reject)
-        layout.addWidget(btn_box)
-
-        dialog.exec()
-
     def on_table_item_changed(self, item):
-        """Lưu CSV khi user chỉnh sửa ô Serial (cột 1).
-        Cột 2 (Ads Link) dùng setCellWidget nên itemChanged không bắn cho nó —
-        thay vào đó, AdsLinkWidget.link_changed signal xử lý riêng.
-        """
-        if item.column() != 1:
+        """Lưu CSV khi user chỉnh sửa ô Serial (cột 2) hoặc Device Name (cột 3)."""
+        if item.column() not in (2, 3):
             return
         self.save_csv_changes()
 
@@ -912,60 +925,53 @@ class AdsTableWidget(QWidget):
         try:
             rows = []
             for row_idx in range(self.table.rowCount()):
-                model = self.table.item(row_idx, 0)
-                serial = self.table.item(row_idx, 1)
-                # For ads link, get from custom widget
-                ads_widget = self.table.cellWidget(row_idx, 2)
-                ads_link = ads_widget.get_link() if ads_widget else ""
-                ads_info = self.table.item(row_idx, 3)
+                model = self.table.item(row_idx, 1)
+                serial = self.table.item(row_idx, 2)
+                device_name = self.table.item(row_idx, 3)
                 rows.append([
                     model.text() if model else "",
                     serial.text() if serial else "",
-                    ads_link,
-                    ads_info.text() if ads_info else "",
+                    device_name.text() if device_name else "",
                 ])
             CSVHelper.write_csv(self.data_csv, rows)
         except Exception as e:
             print(f"Error saving CSV: {e}")
 
-    def on_row_result(self, row_idx: int, ads_info: str):
-        """Cập nhật cột Ads Info khi một device chạy xong."""
-        self.table.blockSignals(True)
-        item = QTableWidgetItem(ads_info)
+    def update_proxy_statuses(self, proxy_data: dict):
+        """Update proxy status columns (4, 5) keyed by serial.
+        proxy_data = { serial: {"type": str, "host_port": str} }
+        """
         non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        item.setFlags(non_editable)
-        self.table.setItem(row_idx, 3, item)
-        self.table.resizeColumnToContents(3)
+        self.table.blockSignals(True)
+        for row_idx in range(self.table.rowCount()):
+            serial_item = self.table.item(row_idx, 2)
+            serial = serial_item.text() if serial_item else ""
+            info = proxy_data.get(serial, {})
+            ptype = info.get("type", "—")
+            hport = info.get("host_port", "—")
+
+            t_item = QTableWidgetItem(ptype)
+            t_item.setFlags(non_editable)
+            h_item = QTableWidgetItem(hport)
+            h_item.setFlags(non_editable)
+
+            if ptype not in ("—", "None"):
+                t_item.setForeground(Qt.GlobalColor.darkGreen)
+                h_item.setForeground(Qt.GlobalColor.darkGreen)
+            else:
+                t_item.setForeground(Qt.GlobalColor.gray)
+                h_item.setForeground(Qt.GlobalColor.gray)
+
+            self.table.setItem(row_idx, 4, t_item)
+            self.table.setItem(row_idx, 5, h_item)
         self.table.blockSignals(False)
-        # Lưu CSV ngay
-        try:
-            rows = []
-            for r in range(self.table.rowCount()):
-                model = self.table.item(r, 0)
-                serial = self.table.item(r, 1)
-                # For ads link, get from custom widget
-                ads_widget = self.table.cellWidget(r, 2)
-                ads_link = ads_widget.get_link() if ads_widget else ""
-                ads_info = self.table.item(r, 3)
-                rows.append([
-                    model.text() if model else "",
-                    serial.text() if serial else "",
-                    ads_link,
-                    ads_info.text() if ads_info else "",
-                ])
-            CSVHelper.write_csv(self.data_csv, rows)
-        except Exception as e:
-            print(f"Error saving ads info: {e}")
 
     def get_table_data(self):
         """Get table data for worker operations."""
         table_data = []
         row_count = self.table.rowCount()
         for row in range(row_count):
-            serial_item = self.table.item(row, 1)
-            # Get ads link from custom widget
-            ads_widget = self.table.cellWidget(row, 2)
-            ads_link = ads_widget.get_link() if ads_widget else ""
+            serial_item = self.table.item(row, 2)
             serial = serial_item.text() if serial_item else ""
-            table_data.append({'serial': serial, 'ads_link': ads_link, 'row_index': row})
+            table_data.append({'serial': serial, 'row_index': row})
         return table_data
