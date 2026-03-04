@@ -212,13 +212,6 @@ class CookieLoaderGUI(QWidget):
     def reset_window_title(self):
         self.setWindowTitle(self.app_name)
 
-    def update_status(self, text):
-        if text:
-            self.setWindowTitle(f'{self.app_name} - {text}')
-            self.status_timer.start(5000)
-        else:
-            self.reset_window_title()
-
     def on_worker_finished(self, message):
         self.update_status(message)
         self.enable_buttons()
