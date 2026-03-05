@@ -313,7 +313,7 @@ class AdsTableWidget(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(['No', 'Model', 'Serial', 'Device Name', 'Proxy Type', 'Host:Port'])
+        self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Model', 'Proxy Type', 'Host:Port'])
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemChanged.connect(self.on_table_item_changed)
@@ -322,11 +322,9 @@ class AdsTableWidget(QWidget):
         self.table.focusOutEvent = self.table_focus_out_event
         self.table.mouseDoubleClickEvent = self.table_mouse_double_click_event
 
-        # Dùng delegate riêng cho cột Serial / Device Name để editor không bị tràn ra ngoài ô
-        self._serial_delegate = SerialDelegate(self.table)
-        self.table.setItemDelegateForColumn(2, self._serial_delegate)
+        # Dùng delegate riêng cho cột Device Name để editor không bị tràn ra ngoài ô
         self._device_name_delegate = SerialDelegate(self.table)
-        self.table.setItemDelegateForColumn(3, self._device_name_delegate)
+        self.table.setItemDelegateForColumn(1, self._device_name_delegate)
 
         # Remove cell hover effect but keep row selection, make header text bolder
         self.table.setStyleSheet("""
@@ -382,7 +380,7 @@ class AdsTableWidget(QWidget):
                 font-weight: bold;
                 font-size: 12px;
                 border: 1px solid #ccc;
-                border-radius: 8px;
+                border-radius: 6px;
                 margin-top: 6px;
                 padding-top: 4px;
                 background-color: #f5f7ff;
@@ -411,7 +409,7 @@ class AdsTableWidget(QWidget):
             "  background: #ffffff;"
             "  color: #212121;"
             "  font-size: 11px;"
-            "  min-height: 16px;"
+            "  min-height: 20px;"
             "  max-height: 20px;"
             "}"
             "QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {"
@@ -422,9 +420,10 @@ class AdsTableWidget(QWidget):
             "}"
             "QSpinBox::up-button, QSpinBox::down-button,"
             "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
-            "  width: 0px;"
+            "  width: 8px; height: 9px;"
             "  border: none;"
-            "  background: transparent;"
+            "  border-radius: 1px;"
+            "  background: #ddd;"
             "}"
             "QComboBox::drop-down {"
             "  border: none; width: 20px;"
@@ -730,7 +729,72 @@ class AdsTableWidget(QWidget):
             "profile":              self._PROFILE_MAP.get(profile_label),
         }
 
-    def get_devices_with_model(self):
+    def get_randomized_human_settings(self) -> dict:
+        """Generate a randomized settings dict using UI values as bounds.
+
+        Each call produces independent random values within the ranges set
+        in the UI controls — used for the 'Randomly different' behavior mode.
+        """
+        import random as _rnd
+
+        # Duration: random point within [min_dur, max_dur]
+        min_dur = float(self._hs_min_dur.value())
+        max_dur = float(self._hs_max_dur.value())
+        dur = _rnd.uniform(min_dur, max_dur)
+
+        # Read pause: random within [read_min, read_max]
+        read_min = self._hs_read_min.value()
+        read_max = self._hs_read_max.value()
+        read_p = _rnd.uniform(read_min, read_max)
+
+        # Scroll distance: random range within the UI bounds
+        sd_min = self._hs_scroll_min.value()
+        sd_max = self._hs_scroll_max.value()
+        a = _rnd.randint(sd_min, sd_max)
+        b = _rnd.randint(sd_min, sd_max)
+        scroll_dist_min, scroll_dist_max = (min(a, b), max(a, b)) if a != b else (a, a + 50)
+
+        # Click / burst prob: random within [0, UI value]
+        click_prob = _rnd.uniform(0.05, self._hs_click_prob.value() / 100.0)
+        burst_prob = _rnd.uniform(0.05, self._hs_burst_prob.value() / 100.0)
+
+        # Scroll focus / overshoot: random within full slider range
+        scroll_focus = _rnd.randint(5, 30) / 10.0
+        overshoot_prob = _rnd.randint(0, 60) / 100.0
+
+        # Swipe speed: random within [0, UI values], None = auto
+        raw_speed_min = self._hs_speed_min.value()
+        raw_speed_max = self._hs_speed_max.value()
+        if raw_speed_max:
+            speed_min_r = _rnd.randint(0, raw_speed_max) or None
+            speed_max_r = _rnd.randint(speed_min_r or 0, raw_speed_max) or None
+        else:
+            speed_min_r = speed_max_r = None
+
+        # Scroll style: random from all options (ignore UI selection)
+        style_keys = list(self._STYLE_MAP.keys())
+        style_label = _rnd.choice(style_keys)
+
+        # Profile: random from all options (ignore UI selection)
+        profile_keys = list(self._PROFILE_MAP.keys())
+        profile_label = _rnd.choice(profile_keys)
+
+        return {
+            "min_duration":         dur,
+            "max_duration":         dur,
+            "click_prob":           click_prob,
+            "burst_prob":           burst_prob,
+            "scroll_dist_min":      scroll_dist_min,
+            "scroll_dist_max":      scroll_dist_max,
+            "read_pause_min":       read_p,
+            "read_pause_max":       read_p,
+            "scroll_focus":         scroll_focus,
+            "overshoot_prob":       overshoot_prob,
+            "swipe_speed_min_ms":   speed_min_r,
+            "swipe_speed_max_ms":   speed_max_r,
+            "scroll_style_weights": self._STYLE_MAP.get(style_label),
+            "profile":              self._PROFILE_MAP.get(profile_label),
+        }
         try:
             out = subprocess.check_output(
                 ["adb", "devices", "-l"],
@@ -794,17 +858,17 @@ class AdsTableWidget(QWidget):
                 num_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, 0, num_item)
 
-                model_item = QTableWidgetItem(model)
-                model_item.setFlags(non_editable)
-                self.table.setItem(row_idx, 1, model_item)
-
-                serial_item = QTableWidgetItem(serial)
-                serial_item.setFlags(editable)
-                self.table.setItem(row_idx, 2, serial_item)
-
                 device_name_item = QTableWidgetItem(device_name)
                 device_name_item.setFlags(editable)
-                self.table.setItem(row_idx, 3, device_name_item)
+                self.table.setItem(row_idx, 1, device_name_item)
+
+                serial_item = QTableWidgetItem(serial)
+                serial_item.setFlags(non_editable)
+                self.table.setItem(row_idx, 2, serial_item)
+
+                model_item = QTableWidgetItem(model)
+                model_item.setFlags(non_editable)
+                self.table.setItem(row_idx, 3, model_item)
 
                 # Proxy cols — placeholder until updated externally
                 for col in (4, 5):
@@ -881,7 +945,7 @@ class AdsTableWidget(QWidget):
             row = index.row()
             col = index.column()
 
-            if col in (2, 3):  # Serial or Device Name column
+            if col == 1:  # Device Name column
                 item = self.table.item(row, col)
                 if item:
                     self.table.editItem(item)
@@ -889,8 +953,8 @@ class AdsTableWidget(QWidget):
         QTableWidget.mouseDoubleClickEvent(self.table, event)
 
     def on_table_item_changed(self, item):
-        """Lưu CSV khi user chỉnh sửa ô Serial (cột 2) hoặc Device Name (cột 3)."""
-        if item.column() not in (2, 3):
+        """Lưu CSV khi user chỉnh sửa ô Device Name (cột 1)."""
+        if item.column() != 1:
             return
         self.save_csv_changes()
 
@@ -899,9 +963,9 @@ class AdsTableWidget(QWidget):
         try:
             rows = []
             for row_idx in range(self.table.rowCount()):
-                model = self.table.item(row_idx, 1)
+                device_name = self.table.item(row_idx, 1)
                 serial = self.table.item(row_idx, 2)
-                device_name = self.table.item(row_idx, 3)
+                model = self.table.item(row_idx, 3)
                 rows.append([
                     model.text() if model else "",
                     serial.text() if serial else "",
@@ -949,3 +1013,46 @@ class AdsTableWidget(QWidget):
             serial = serial_item.text() if serial_item else ""
             table_data.append({'serial': serial, 'row_index': row})
         return table_data
+
+    def get_devices_with_model(self):
+        try:
+            # Get connected devices
+            result = subprocess.run(
+                ["adb", "devices"],
+                startupinfo=subprocess.STARTUPINFO() if os.name == 'nt' else None,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            devices = []
+            lines = result.stdout.strip().split('\n')
+
+            # Skip header line, process device lines
+            for line in lines[1:]:
+                if line.strip() and '\tdevice' in line:
+                    serial = line.split('\t')[0].strip()
+                    if serial:
+                        # Get model for this device
+                        try:
+                            model_result = subprocess.run(
+                                ["adb", "-s", serial, "shell", "getprop", "ro.product.model"],
+                                startupinfo=subprocess.STARTUPINFO() if os.name == 'nt' else None,
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+                            model = model_result.stdout.strip() or "Unknown"
+                        except Exception:
+                            model = "Unknown"
+
+                        devices.append({
+                            "serial": serial,
+                            "model": model
+                        })
+
+            return devices
+
+        except Exception as e:
+            print(f"Error getting devices: {e}")
+            return []

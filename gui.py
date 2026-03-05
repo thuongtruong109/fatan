@@ -2,7 +2,7 @@ import sys, os, subprocess, shutil, json
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout,
     QTableWidget, QTableWidgetItem, QHBoxLayout,
-    QStackedWidget, QLabel, QLineEdit,
+    QStackedWidget, QLabel, QLineEdit, QTextEdit, QGroupBox, QComboBox,
 )
 from PySide6.QtCore import QTimer, QThread, Signal, Qt
 from PySide6.QtGui import QIcon
@@ -24,6 +24,8 @@ from features.ads import run_ads_automation
 from features.ads import AdsTableWidget
 from features.settings import SettingsWidget
 from features.proxy import ProxyWidget
+from features.info import DeviceInfoWidget
+from features.actions import ActionsWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -35,6 +37,8 @@ class Worker(QThread):
         self.table_data = table_data
         self.settings = settings or {}
         self._stop_flag = False
+        # Optional callable: () -> dict, used when behavior_mode == "randomly_different"
+        self._human_settings_fn = self.settings.pop("human_settings_fn", None)
 
     def stop(self):
         self._stop_flag = True
@@ -114,10 +118,20 @@ class Worker(QThread):
             if not serial:
                 continue
 
+            # Resolve human settings: fixed or freshly randomized per device
+            if self._human_settings_fn is not None:
+                human = self._human_settings_fn()
+                self.progress.emit(
+                    f'🎲 Randomized behavior for {serial} — '
+                    f'duration={human.get("min_duration", "?"):.0f}s  '
+                    f'profile={human.get("profile") or "auto"}'
+                )
+            else:
+                human = self.settings.get("human", {})
+
             try:
                 self.progress.emit(f'🤖 Running ads automation on: {serial}')
-                result = run_ads_automation(serial, ads_link,
-                                            human_settings=self.settings.get("human", {}))
+                result = run_ads_automation(serial, ads_link, human_settings=human)
                 title = result.get('title', '') if isinstance(result, dict) else str(result)
                 domain = result.get('domain', '') if isinstance(result, dict) else ''
                 ads_info = f"{title} | {domain}" if domain else title
@@ -173,6 +187,10 @@ class CookieLoaderGUI(QWidget):
         self.proxy_widget = ProxyWidget()
         self.proxy_widget.status_update.connect(self.update_status)
         self.proxy_widget.proxy_status_updated.connect(self.ads_table.update_proxy_statuses)
+
+        self.info_widget = DeviceInfoWidget()
+        self.actions_widget = ActionsWidget()
+        self.actions_widget.status_update.connect(self.update_status)
 
         # ── Left navigation panel ────────────────────────────────────────
         left_panel = QWidget()
@@ -244,6 +262,14 @@ class CookieLoaderGUI(QWidget):
         self.settings_button.clicked.connect(lambda: self._open_tab(2))
         left_layout.addWidget(self.settings_button)
 
+        self.info_button = _nav_btn('ℹ️ Info')
+        self.info_button.clicked.connect(lambda: self._open_tab(3))
+        left_layout.addWidget(self.info_button)
+
+        self.actions_button = _nav_btn('⚡ Actions')
+        self.actions_button.clicked.connect(lambda: self._open_tab(4))
+        left_layout.addWidget(self.actions_button)
+
         # ── Right content panel ──────────────────────────────────────────
         right_panel = QWidget()
         right_layout = QVBoxLayout()
@@ -275,14 +301,13 @@ class CookieLoaderGUI(QWidget):
         # Apply consistent input styling
         self.ads_link_input.setStyleSheet(
             "QLineEdit {"
-            "  border: 1px solid #bdbdbd;"
+            "  border: 1px solid #ddd;"
             "  border-radius: 4px;"
             "  padding: 2px 6px;"
             "  background: #ffffff;"
             "  color: #212121;"
             "  font-size: 11px;"
-            "  min-height: 20px;"
-            "  max-height: 24px;"
+            "  height: 22px;"
             "}"
             "QLineEdit:focus {"
             "  border: 1px solid #1976d2;"
@@ -290,7 +315,7 @@ class CookieLoaderGUI(QWidget):
         )
         ads_link_row.addWidget(self.ads_link_input)
         self.ads_link_copy_btn = QPushButton("📋")
-        self.ads_link_copy_btn.setFixedSize(24, 24)
+        self.ads_link_copy_btn.setFixedSize(32, 32)
         self.ads_link_copy_btn.setToolTip("Copy ads link to clipboard")
         self.ads_link_copy_btn.clicked.connect(self._copy_ads_link)
         ads_link_row.addWidget(self.ads_link_copy_btn)
@@ -316,10 +341,96 @@ class CookieLoaderGUI(QWidget):
             "QPushButton:disabled { background-color: #ef9a9a; }"
         )
         self.stop_ads_button.clicked.connect(self.stop_ads)
+        self.behavior_mode_combo = QComboBox()
+        self.behavior_mode_combo.addItems(["Same in series", "Randomly different"])
+        self.behavior_mode_combo.setToolTip(
+            "Same in series: all devices use identical behavior options for this run.\n"
+            "Randomly different: each device gets independently randomized options."
+        )
+        self.behavior_mode_combo.setStyleSheet(
+            "QComboBox {"
+            "  border: 1px solid #bdbdbd; border-radius: 4px;"
+            "  padding: 2px 6px; background: #ffffff; color: #212121;"
+            "  font-size: 11px; min-height: 20px; max-height: 28px;"
+            "}"
+            "QComboBox:focus { border: 1px solid #1976d2; }"
+            "QComboBox::drop-down { border: none; width: 20px; }"
+        )
+        self.behavior_mode_combo.setCurrentIndex(1)  # default: Randomly different
+        self.view_log_button = QPushButton("📋 View Log")
+        self.view_log_button.setCheckable(True)
+        self.view_log_button.setChecked(False)
+        self.view_log_button.setToolTip("Toggle log panel visibility")
+        self.view_log_button.setStyleSheet(
+            "QPushButton { background-color: #455a64; color: white; font-weight: bold;"
+            " padding: 6px 16px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #37474f; }"
+            "QPushButton:checked { background-color: #1976d2; }"
+            "QPushButton:checked:hover { background-color: #1565c0; }"
+        )
         run_btn_row = QHBoxLayout()
+        run_btn_row.addWidget(self.behavior_mode_combo)
         run_btn_row.addWidget(self.run_ads_button)
         run_btn_row.addWidget(self.stop_ads_button)
+        run_btn_row.addWidget(self.view_log_button)
         simulator_layout.addLayout(run_btn_row)
+
+        # ── Log section ─────────────────────────────────────────────────
+        log_group = QGroupBox("📋 Log")
+        log_group.setStyleSheet(
+            "QGroupBox {"
+            "  font-weight: bold;"
+            "  font-size: 12px;"
+            "  border: 1px solid #ccc;"
+            "  border-radius: 6px;"
+            "  margin-top: 6px;"
+            "  padding-top: 4px;"
+            "  background-color: #f5f7ff;"
+            "}"
+            "QGroupBox::title {"
+            "  subcontrol-origin: margin;"
+            "  left: 10px;"
+            "  padding: 0 6px;"
+            "  color: #1565c0;"
+            "}"
+        )
+        log_vl = QVBoxLayout()
+        log_vl.setContentsMargins(6, 6, 6, 6)
+        log_vl.setSpacing(4)
+
+        self.ads_log = QTextEdit()
+        self.ads_log.setReadOnly(True)
+        self.ads_log.setMinimumHeight(120)
+        self.ads_log.setStyleSheet(
+            "QTextEdit {"
+            "  background: #1e1e1e;"
+            "  color: #d4d4d4;"
+            "  font-family: Consolas, monospace;"
+            "  font-size: 11px;"
+            "  border: none;"
+            "  border-radius: 8px;"
+            "  padding: 6px 8px;"
+            "}"
+        )
+        log_vl.addWidget(self.ads_log)
+
+        clear_log_btn = QPushButton("🗑 Clear")
+        clear_log_btn.setFixedHeight(24)
+        clear_log_btn.setStyleSheet(
+            "QPushButton { font-size: 11px; padding: 2px 8px;"
+            " border: 1px solid #bdbdbd; border-radius: 4px; background: #f0f0f0; }"
+            "QPushButton:hover { background: #e0e0e0; }"
+        )
+        clear_log_btn.clicked.connect(self.ads_log.clear)
+        clear_log_row = QHBoxLayout()
+        clear_log_row.addStretch()
+        clear_log_row.addWidget(clear_log_btn)
+        log_vl.addLayout(clear_log_row)
+
+        log_group.setLayout(log_vl)
+        log_group.hide()  # hidden by default; toggled by View Log button
+        self.view_log_button.toggled.connect(log_group.setVisible)
+        simulator_layout.addWidget(log_group)
 
         self.tab_body.addWidget(simulator_page)   # index 0
 
@@ -329,11 +440,23 @@ class CookieLoaderGUI(QWidget):
         # Page 2 – Settings
         self.tab_body.addWidget(self.settings_widget)  # index 2
 
+        # Page 3 – Device Info
+        self.tab_body.addWidget(self.info_widget)   # index 3
+
+        # Page 4 – Actions
+        self.tab_body.addWidget(self.actions_widget)  # index 4
+
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
         layout.addWidget(right_panel)
         self.setLayout(layout)
+
+        # Wire table row selection → update Info / Actions with selected serial
+        self.ads_table.table.itemSelectionChanged.connect(self._on_table_selection_changed)
+
+        # Auto-load Info when the user switches to the Info tab
+        self.tab_body.currentChanged.connect(self._on_tab_changed)
 
     def update_status(self, text):
         if text:
@@ -345,7 +468,7 @@ class CookieLoaderGUI(QWidget):
     def reset_window_title(self):
         self.setWindowTitle(self.app_name)
 
-    # TAB_INDEX: 0=Simulator, 1=Proxy, 2=Settings
+    # TAB_INDEX: 0=Simulator, 1=Proxy, 2=Settings, 3=Info, 4=Actions
     def _open_tab(self, index: int):
         """Show tab_body and switch to the given page index."""
         self.tab_body.setCurrentIndex(index)
@@ -354,7 +477,14 @@ class CookieLoaderGUI(QWidget):
         # Update active tab highlighting
         if self.current_active_tab:
             self.current_active_tab.setChecked(False)
-        self.current_active_tab = [self.simulator_button, self.proxy_button, self.settings_button][index]
+        _tab_buttons = [
+            self.simulator_button,
+            self.proxy_button,
+            self.settings_button,
+            self.info_button,
+            self.actions_button,
+        ]
+        self.current_active_tab = _tab_buttons[index]
         self.current_active_tab.setChecked(True)
 
     def on_worker_finished(self, message):
@@ -395,6 +525,41 @@ class CookieLoaderGUI(QWidget):
             self.ads_link_copy_btn.setText("❌")
             QTimer.singleShot(800, lambda: self.ads_link_copy_btn.setText("📋"))
 
+    def _append_log(self, message: str):
+        """Append a log message to the ads log panel."""
+        self.ads_log.append(message)
+        # Auto-scroll to bottom
+        self.ads_log.verticalScrollBar().setValue(
+            self.ads_log.verticalScrollBar().maximum()
+        )
+
+    def _on_table_selection_changed(self):
+        """When the user clicks a row, push the serial to Info and Actions widgets."""
+        selected = self.ads_table.table.selectionModel().selectedRows()
+        if not selected:
+            return
+        row = selected[0].row()
+        serial_item = self.ads_table.table.item(row, 2)
+        serial = serial_item.text().strip() if serial_item else ""
+
+        # Always keep Info/Actions in sync
+        self.actions_widget.set_device(serial)
+
+        # Only auto-load Info if that tab is currently open
+        if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:
+            self.info_widget.load_device(serial)
+        else:
+            # Store serial so it loads when user switches to the Info tab
+            self.info_widget._serial = serial
+            self.info_widget._serial_label.setText(
+                f"Serial: {serial}" if serial else "No device selected"
+            )
+
+    def _on_tab_changed(self, index: int):
+        """When the user switches to the Info tab, trigger a load if a device is set."""
+        if index == 3 and self.info_widget._serial:
+            self.info_widget.load_device(self.info_widget._serial)
+
     def stop_ads(self):
         """Signal the running worker to stop after the current device."""
         if self.worker and self.worker.isRunning():
@@ -428,15 +593,27 @@ class CookieLoaderGUI(QWidget):
 
         table_data = self.ads_table.get_table_data()
         human_settings = self.ads_table.get_human_settings()
+        behavior_mode = self.behavior_mode_combo.currentText()
 
         self.disable_buttons()
 
-        self.worker = Worker("run_ads", table_data, settings={
-            "human": human_settings,
-            "ads_link": ads_link,
-        })
+        # Auto-open the log panel when a run starts
+        self.view_log_button.setChecked(True)
+
+        worker_settings = {"ads_link": ads_link}
+        if behavior_mode == "Same in series":
+            worker_settings["human"] = human_settings
+            self._append_log(f"▶ Starting run — behavior mode: Same in series")
+        else:
+            # Pass a callable so the worker can generate fresh random settings per device
+            worker_settings["human_settings_fn"] = self.ads_table.get_randomized_human_settings
+            self._append_log(f"▶ Starting run — behavior mode: Randomly different")
+
+        self.worker = Worker("run_ads", table_data, settings=worker_settings)
         self.worker.progress.connect(self.update_status)
+        self.worker.progress.connect(self._append_log)
         self.worker.finished.connect(self.on_worker_finished)
+        self.worker.finished.connect(self._append_log)
         self.worker.start()
 
     def setup_keyboard_for_all(self):
