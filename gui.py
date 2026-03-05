@@ -189,13 +189,17 @@ class CookieLoaderGUI(QWidget):
         self.proxy_widget.proxy_status_updated.connect(self.ads_table.update_proxy_statuses)
 
         self.info_widget = DeviceInfoWidget()
+        self.info_widget.status_update.connect(self.update_status)
         self.actions_widget = ActionsWidget()
         self.actions_widget.status_update.connect(self.update_status)
+        self.actions_widget.setup_keyboard_requested.connect(self.setup_keyboard_for_all)
+        self.actions_widget.install_chrome_requested.connect(self.install_chrome_for_all)
+        self.actions_widget._get_serials_fn = self._collect_serials
 
         # ── Left navigation panel ────────────────────────────────────────
         left_panel = QWidget()
         left_layout = QVBoxLayout()
-        left_layout.setContentsMargins(6, 6, 6, 6)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
         left_panel.setLayout(left_layout)
 
@@ -224,14 +228,6 @@ class CookieLoaderGUI(QWidget):
         self.load_devices_button.clicked.connect(self.ads_table.refresh_devices_and_csv)
         left_layout.addWidget(self.load_devices_button)
 
-        self.setup_keyboard_button = _nav_btn('⌨️ Setup Keyboard')
-        self.setup_keyboard_button.clicked.connect(self.setup_keyboard_for_all)
-        left_layout.addWidget(self.setup_keyboard_button)
-
-        self.install_chrome_button = _nav_btn('🌐 Install Chrome')
-        self.install_chrome_button.clicked.connect(self.install_chrome_for_all)
-        left_layout.addWidget(self.install_chrome_button)
-
         self.screen_on_button = _nav_btn('💡 Screen ON')
         self.screen_on_button.clicked.connect(self.turn_screen_on_all)
         left_layout.addWidget(self.screen_on_button)
@@ -247,6 +243,14 @@ class CookieLoaderGUI(QWidget):
 
         left_layout.addStretch()
 
+        self.info_button = _nav_btn('ℹ️ Info')
+        self.info_button.clicked.connect(lambda: self._open_tab(3))
+        left_layout.addWidget(self.info_button)
+
+        self.actions_button = _nav_btn('⚡ Actions')
+        self.actions_button.clicked.connect(lambda: self._open_tab(4))
+        left_layout.addWidget(self.actions_button)
+
         self.run_ads_button = QPushButton('Run Ads')
         self.run_ads_button.clicked.connect(self.run_ads_for_all)
 
@@ -261,14 +265,6 @@ class CookieLoaderGUI(QWidget):
         self.settings_button = _nav_btn('⚙️ Settings')
         self.settings_button.clicked.connect(lambda: self._open_tab(2))
         left_layout.addWidget(self.settings_button)
-
-        self.info_button = _nav_btn('ℹ️ Info')
-        self.info_button.clicked.connect(lambda: self._open_tab(3))
-        left_layout.addWidget(self.info_button)
-
-        self.actions_button = _nav_btn('⚡ Actions')
-        self.actions_button.clicked.connect(lambda: self._open_tab(4))
-        left_layout.addWidget(self.actions_button)
 
         # ── Right content panel ──────────────────────────────────────────
         right_panel = QWidget()
@@ -494,8 +490,6 @@ class CookieLoaderGUI(QWidget):
 
     def disable_buttons(self):
         self.load_devices_button.setEnabled(False)
-        self.setup_keyboard_button.setEnabled(False)
-        self.install_chrome_button.setEnabled(False)
         self.run_ads_button.setEnabled(False)
         self.stop_ads_button.setEnabled(True)
         self.screen_on_button.setEnabled(False)
@@ -505,8 +499,6 @@ class CookieLoaderGUI(QWidget):
 
     def enable_buttons(self):
         self.load_devices_button.setEnabled(True)
-        self.setup_keyboard_button.setEnabled(True)
-        self.install_chrome_button.setEnabled(True)
         self.run_ads_button.setEnabled(True)
         self.stop_ads_button.setEnabled(False)
         self.screen_on_button.setEnabled(True)
@@ -544,6 +536,7 @@ class CookieLoaderGUI(QWidget):
 
         # Always keep Info/Actions in sync
         self.actions_widget.set_device(serial)
+        self.info_widget.set_device(serial)
 
         # Only auto-load Info if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:

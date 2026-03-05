@@ -5,14 +5,12 @@ fetched on-demand via ADB — uses every available method to maximise data cover
 """
 from __future__ import annotations
 
-import subprocess
-import os
-import re
+import subprocess, os, re, time
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox,
-    QCheckBox, QScrollArea, QFrame,
+    QCheckBox, QComboBox, QScrollArea, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
@@ -23,8 +21,6 @@ _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 for _p in [r"C:\android-tools\platform-tools"]:
     if os.path.isdir(_p) and _p not in os.environ.get("PATH", ""):
         os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
-
-
 
 def _run(serial: str, *args: str, timeout: int = 10) -> str:
     """Run an adb command and return stripped stdout (never raises)."""
@@ -279,6 +275,134 @@ class _FetchWorker(QThread):
             self.error.emit(str(e))
 
 
+# ── Country / carrier data ────────────────────────────────────────────────
+_COUNTRIES = [
+    "United States", "United Kingdom", "Canada", "Australia",
+    "Germany", "France", "Japan", "South Korea", "China",
+    "India", "Brazil", "Mexico", "Vietnam", "Thailand",
+    "Indonesia", "Philippines", "Singapore", "Malaysia",
+    "Netherlands", "Spain", "Italy", "Poland", "Russia",
+    "Turkey", "Saudi Arabia", "UAE", "South Africa",
+]
+
+_CARRIERS: dict[str, list[str]] = {
+    "United States": [
+        "AT&T", "T-Mobile", "Verizon", "Sprint",
+        "US Cellular", "Boost Mobile", "Cricket Wireless",
+        "Aeris Comm. Inc.-850", "MetroPCS",
+    ],
+    "United Kingdom": ["EE", "O2", "Vodafone", "Three"],
+    "Vietnam": ["Viettel", "Mobifone", "Vinaphone", "Gmobile", "Reddi"],
+    "default": ["Carrier A", "Carrier B", "Carrier C"],
+}
+
+
+def _adb_info(serial: str, *args: str, timeout: int = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["adb", "-s", serial, *args],
+        startupinfo=_si,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _shell_info(serial: str, cmd: str) -> str:
+    r = _adb_info(serial, "shell", cmd)
+    return (r.stdout or "").strip()
+
+
+class _ChangeDeviceWorker(QThread):
+    finished = Signal()
+
+    def __init__(self, serial: str, settings: dict):
+        super().__init__()
+        self.serial = serial
+        self.settings = settings
+
+    def run(self):
+        s = self.serial
+        cfg = self.settings
+        try:
+            if cfg.get("logout_gmail"):
+                _adb_info(s, "shell", "pm", "clear", "com.google.android.gms")
+                time.sleep(1)
+            if not cfg.get("no_wipe_google"):
+                _adb_info(s, "shell", "pm", "clear", "com.google.android.gsf")
+                time.sleep(0.5)
+            if cfg.get("fake_sim"):
+                sim_code = cfg.get("sim_code", "")
+                carrier  = cfg.get("carrier", "")
+                if sim_code:
+                    _shell_info(s, f"setprop gsm.operator.numeric {sim_code}")
+                    _shell_info(s, f"setprop persist.radio.operator.numeric {sim_code}")
+                if carrier:
+                    escaped = carrier.replace(" ", "\\ ")
+                    _shell_info(s, f"setprop gsm.operator.alpha {escaped}")
+                    _shell_info(s, f"setprop persist.radio.operator.alpha {escaped}")
+            if cfg.get("fake_mac"):
+                import random
+                mac = ":".join(f"{random.randint(0,255):02x}" for _ in range(6))
+                first = int(mac.split(":")[0], 16) | 0x02
+                parts = mac.split(":")
+                parts[0] = f"{first:02x}"
+                mac = ":".join(parts)
+                _shell_info(s, f"ip link set wlan0 address {mac} 2>/dev/null || true")
+            if cfg.get("change_tz") and cfg.get("country"):
+                tz_map = {
+                    "United States": "America/New_York",
+                    "United Kingdom": "Europe/London",
+                    "Vietnam": "Asia/Ho_Chi_Minh",
+                    "Japan": "Asia/Tokyo",
+                    "Germany": "Europe/Berlin",
+                    "France": "Europe/Paris",
+                    "Australia": "Australia/Sydney",
+                    "China": "Asia/Shanghai",
+                    "India": "Asia/Kolkata",
+                    "Brazil": "America/Sao_Paulo",
+                    "Singapore": "Asia/Singapore",
+                    "Thailand": "Asia/Bangkok",
+                }
+                tz = tz_map.get(cfg["country"], "")
+                if tz:
+                    _shell_info(s, f"setprop persist.sys.timezone {tz}")
+                    _adb_info(s, "shell", "settings", "put", "global", "time_zone", tz)
+            if cfg.get("fake_location"):
+                _adb_info(s, "shell", "settings", "put", "secure", "mock_location", "1")
+                _adb_info(s, "shell", "appops", "set",
+                          "com.android.shell", "android:mock_location", "allow")
+            if cfg.get("safetynet"):
+                _shell_info(s, "setprop ro.boot.verifiedbootstate green")
+                _shell_info(s, "setprop ro.boot.flash.locked 1")
+        except Exception:
+            pass
+
+
+class _ChangeSimWorker(QThread):
+    finished = Signal()
+
+    def __init__(self, serial: str, settings: dict):
+        super().__init__()
+        self.serial = serial
+        self.settings = settings
+
+    def run(self):
+        s = self.serial
+        cfg = self.settings
+        try:
+            sim_code = cfg.get("sim_code", "")
+            carrier  = cfg.get("carrier", "")
+            if sim_code:
+                _shell_info(s, f"setprop gsm.operator.numeric {sim_code}")
+                _shell_info(s, f"setprop persist.radio.operator.numeric {sim_code}")
+            if carrier:
+                escaped = carrier.replace(" ", "\\ ")
+                _shell_info(s, f"setprop gsm.operator.alpha {escaped}")
+                _shell_info(s, f"setprop persist.radio.operator.alpha {escaped}")
+        except Exception:
+            pass
+
+
 # ── Styles ────────────────────────────────────────────────────────────────
 _GROUP_SS = """
     QGroupBox {
@@ -314,18 +438,63 @@ _FIELD_SS = (
 
 _LABEL_SS = "color: #555; font-size: 11px; font-weight: bold;"
 
+_INPUT_SS = (
+    "QLineEdit {"
+    "  border: 1px solid #dce3f0; border-radius: 4px;"
+    "  padding: 2px 6px; background: #ffffff; color: #212121;"
+    "  font-size: 11px; min-height: 20px;"
+    "}"
+    "QLineEdit:focus { border: 1px solid #1976d2; }"
+)
+
+_COMBO_SS = (
+    "QComboBox {"
+    "  border: 1px solid #dce3f0; border-radius: 4px;"
+    "  padding: 2px 6px; background: #ffffff; color: #212121;"
+    "  font-size: 11px; min-height: 22px;"
+    "}"
+    "QComboBox:focus { border: 1px solid #1976d2; }"
+    "QComboBox::drop-down { border: none; }"
+)
+
+_BTN_PRIMARY_SS = (
+    "QPushButton { background-color: #1976d2; color: white; font-weight: bold;"
+    " padding: 5px 14px; border-radius: 4px; font-size: 11px; }"
+    "QPushButton:hover { background-color: #1565c0; }"
+    "QPushButton:disabled { background-color: #90caf9; }"
+)
+
+_BTN_SECONDARY_SS = (
+    "QPushButton { border: 1px solid #bdbdbd; border-radius: 4px;"
+    " padding: 5px 14px; background: #f0f0f0; font-size: 11px; }"
+    "QPushButton:hover { background: #e0e0e0; }"
+    "QPushButton:disabled { background: #f5f5f5; color: #aaa; }"
+)
+
+_CB_SS = "QCheckBox { font-size: 11px; color: #333; }"
+
 
 # ── DeviceInfoWidget ─────────────────────────────────────────────────────
 class DeviceInfoWidget(QWidget):
     """Tab page — shows live device info for the selected device."""
+    status_update = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._serial: str = ""
         self._worker: _FetchWorker | None = None
+        self._change_workers: list[QThread] = []
         self._build_ui()
 
     # ── public API ───────────────────────────────────────────────────────
+    def set_device(self, serial: str):
+        """Called when user selects a row in the table."""
+        self._serial = serial
+        label = f"Serial: {serial}" if serial else "No device selected"
+        self._serial_label.setText(label)
+        enabled = bool(serial)
+        self._change_device_btn.setEnabled(enabled)
+        self._change_sim_btn.setEnabled(enabled)
     def load_device(self, serial: str):
         if not serial:
             self._clear_fields()
@@ -475,6 +644,148 @@ class DeviceInfoWidget(QWidget):
         )
         f3.addRow(QLabel(""), self._wifi_manual_input)
         inner_vl.addWidget(g3)
+
+        # ── Group 4: Phone Settings ──────────────────────────────────────
+        ps_group = QGroupBox("📱 Phone Settings")
+        ps_group.setStyleSheet(_GROUP_SS)
+        ps_vl = QVBoxLayout()
+        ps_vl.setContentsMargins(12, 10, 12, 10)
+        ps_vl.setSpacing(8)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+
+        lbl_country = QLabel("Country:")
+        lbl_country.setStyleSheet(_LABEL_SS)
+        lbl_country.setFixedWidth(52)
+        self._country_combo = QComboBox()
+        self._country_combo.addItems(_COUNTRIES)
+        self._country_combo.setStyleSheet(_COMBO_SS)
+        self._country_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._country_combo.currentTextChanged.connect(self._on_country_changed)
+        row1.addWidget(lbl_country)
+        row1.addWidget(self._country_combo, 2)
+
+        lbl_carrier = QLabel("Carrier:")
+        lbl_carrier.setStyleSheet(_LABEL_SS)
+        lbl_carrier.setFixedWidth(46)
+        self._carrier_combo = QComboBox()
+        self._carrier_combo.setStyleSheet(_COMBO_SS)
+        self._carrier_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        row1.addWidget(lbl_carrier)
+        row1.addWidget(self._carrier_combo, 2)
+
+        lbl_simcode = QLabel("Fixed Sim Code:")
+        lbl_simcode.setStyleSheet(_LABEL_SS)
+        self._simcode_input = QLineEdit()
+        self._simcode_input.setPlaceholderText("e.g. 310410")
+        self._simcode_input.setStyleSheet(_INPUT_SS)
+        self._simcode_input.setFixedWidth(90)
+        row1.addWidget(lbl_simcode)
+        row1.addWidget(self._simcode_input)
+
+        ps_vl.addLayout(row1)
+
+        cb_grid = QGridLayout()
+        cb_grid.setHorizontalSpacing(16)
+        cb_grid.setVerticalSpacing(4)
+
+        def _cb(label: str, default: bool = False) -> QCheckBox:
+            c = QCheckBox(label)
+            c.setStyleSheet(_CB_SS)
+            c.setChecked(default)
+            return c
+
+        self._cb_safetynet   = _cb("Pass SafetyNet Device",            default=True)
+        self._cb_fake_sim    = _cb("Fake Sim Info",                     default=True)
+        self._cb_fake_mac    = _cb("Fake MAC Address",                  default=True)
+        self._cb_logout_gm   = _cb("Logout gmail trước khi change",     default=False)
+        self._cb_no_wipe     = _cb("Không wipe google data khi change", default=False)
+        self._cb_uninstall   = _cb("Gỡ ứng dụng khi change",           default=False)
+        self._cb_random_carr = _cb("Random Carrier By Country",         default=False)
+        self._cb_change_tz   = _cb("Change Timezone",                   default=True)
+        self._cb_fake_loc    = _cb("Fake Location",                     default=True)
+
+        checkboxes = [
+            (self._cb_safetynet,   0, 0),
+            (self._cb_fake_sim,    1, 0),
+            (self._cb_fake_mac,    2, 0),
+            (self._cb_logout_gm,   0, 1),
+            (self._cb_no_wipe,     1, 1),
+            (self._cb_uninstall,   2, 1),
+            (self._cb_random_carr, 0, 2),
+            (self._cb_change_tz,   1, 2),
+            (self._cb_fake_loc,    2, 2),
+        ]
+        for widget, row, col in checkboxes:
+            cb_grid.addWidget(widget, row, col)
+
+        ps_vl.addLayout(cb_grid)
+        ps_group.setLayout(ps_vl)
+        inner_vl.addWidget(ps_group)
+
+        self._on_country_changed(self._country_combo.currentText())
+
+        # ── Group 5: Device Filter ───────────────────────────────────────
+        df_group = QGroupBox("🔍 Device Filter")
+        df_group.setStyleSheet(_GROUP_SS)
+        df_fl = QFormLayout()
+        df_fl.setContentsMargins(12, 10, 12, 10)
+        df_fl.setSpacing(6)
+        df_fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        df_fl.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        def _flbl(t: str) -> QLabel:
+            l = QLabel(t)
+            l.setStyleSheet(_LABEL_SS)
+            return l
+
+        self._filter_brand = QLineEdit()
+        self._filter_brand.setPlaceholderText("e.g. Samsung  (blank = all)")
+        self._filter_brand.setStyleSheet(_INPUT_SS)
+
+        self._filter_model = QLineEdit()
+        self._filter_model.setPlaceholderText("e.g. SM-G991  (blank = all)")
+        self._filter_model.setStyleSheet(_INPUT_SS)
+
+        self._filter_os = QLineEdit()
+        self._filter_os.setPlaceholderText("e.g. 12  (blank = all)")
+        self._filter_os.setStyleSheet(_INPUT_SS)
+
+        df_fl.addRow(_flbl("Brand:"),       self._filter_brand)
+        df_fl.addRow(_flbl("Model:"),       self._filter_model)
+        df_fl.addRow(_flbl("Android OS:"),  self._filter_os)
+        df_group.setLayout(df_fl)
+        inner_vl.addWidget(df_group)
+
+        # ── Group 6: Actions ─────────────────────────────────────────────
+        act_group = QGroupBox("⚡ Actions")
+        act_group.setStyleSheet(_GROUP_SS)
+        act_vl = QVBoxLayout()
+        act_vl.setContentsMargins(12, 10, 12, 10)
+        act_vl.setSpacing(8)
+
+        act_btn_row = QHBoxLayout()
+        act_btn_row.setSpacing(10)
+
+        self._change_device_btn = QPushButton("🔄  Change Device")
+        self._change_device_btn.setStyleSheet(_BTN_PRIMARY_SS)
+        self._change_device_btn.setEnabled(False)
+        self._change_device_btn.setMinimumHeight(32)
+        self._change_device_btn.clicked.connect(self._run_change_device)
+        act_btn_row.addWidget(self._change_device_btn, 1)
+
+        self._change_sim_btn = QPushButton("📡  Change SIM Info Only")
+        self._change_sim_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        self._change_sim_btn.setEnabled(False)
+        self._change_sim_btn.setMinimumHeight(32)
+        self._change_sim_btn.clicked.connect(self._run_change_sim)
+        act_btn_row.addWidget(self._change_sim_btn, 1)
+
+        act_vl.addLayout(act_btn_row)
+        act_group.setLayout(act_vl)
+        inner_vl.addWidget(act_group)
+
         inner_vl.addStretch()
 
         scroll.setWidget(inner)
@@ -542,3 +853,52 @@ class DeviceInfoWidget(QWidget):
     def _on_error(self, msg: str):
         self._set_state("error")
         self._serial_label.setText(f"Serial: {self._serial}  ⚠ {msg}")
+
+    # ── Phone Settings helpers ────────────────────────────────────────────
+    def _on_country_changed(self, country: str):
+        self._carrier_combo.clear()
+        carriers = _CARRIERS.get(country, _CARRIERS["default"])
+        self._carrier_combo.addItems(carriers)
+
+    def _collect_settings(self) -> dict:
+        sim_code = self._simcode_input.text().strip()
+        carrier = "" if self._cb_random_carr.isChecked() else self._carrier_combo.currentText()
+        return {
+            "country":        self._country_combo.currentText(),
+            "carrier":        carrier,
+            "sim_code":       sim_code,
+            "safetynet":      self._cb_safetynet.isChecked(),
+            "fake_sim":       self._cb_fake_sim.isChecked(),
+            "fake_mac":       self._cb_fake_mac.isChecked(),
+            "logout_gmail":   self._cb_logout_gm.isChecked(),
+            "no_wipe_google": self._cb_no_wipe.isChecked(),
+            "uninstall_apps": self._cb_uninstall.isChecked(),
+            "random_carrier": self._cb_random_carr.isChecked(),
+            "change_tz":      self._cb_change_tz.isChecked(),
+            "fake_location":  self._cb_fake_loc.isChecked(),
+            "filter_brand":   self._filter_brand.text().strip(),
+            "filter_model":   self._filter_model.text().strip(),
+            "filter_os":      self._filter_os.text().strip(),
+        }
+
+    def _run_change_device(self):
+        if not self._serial:
+            return
+        settings = self._collect_settings()
+        self._change_device_btn.setEnabled(False)
+        w = _ChangeDeviceWorker(self._serial, settings)
+        w.finished.connect(lambda: self._change_device_btn.setEnabled(bool(self._serial)))
+        w.finished.connect(lambda: self._change_workers.remove(w) if w in self._change_workers else None)
+        self._change_workers.append(w)
+        w.start()
+
+    def _run_change_sim(self):
+        if not self._serial:
+            return
+        settings = self._collect_settings()
+        self._change_sim_btn.setEnabled(False)
+        w = _ChangeSimWorker(self._serial, settings)
+        w.finished.connect(lambda: self._change_sim_btn.setEnabled(bool(self._serial)))
+        w.finished.connect(lambda: self._change_workers.remove(w) if w in self._change_workers else None)
+        self._change_workers.append(w)
+        w.start()

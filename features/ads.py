@@ -382,7 +382,7 @@ class AdsTableWidget(QWidget):
                 border: 1px solid #ccc;
                 border-radius: 6px;
                 margin-top: 6px;
-                padding-top: 4px;
+                padding-top: 2px;
                 background-color: #f5f7ff;
             }
             QGroupBox::title {
@@ -395,7 +395,7 @@ class AdsTableWidget(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(0)
-        grid.setContentsMargins(10, 8, 10, 10)
+        grid.setContentsMargins(8, 6, 8, 8)
 
         # Shared style for all spinboxes, combos and slider-value labels
         _SPIN_W = 72   # fixed width for every spin-box
@@ -520,14 +520,13 @@ class AdsTableWidget(QWidget):
                 "}"
             )
             vl = QVBoxLayout(w)
-            vl.setContentsMargins(10, 8, 10, 10)
-            vl.setSpacing(6)
+            vl.setContentsMargins(10, 6, 10, 8)
+            vl.setSpacing(4)
             for item in rows_content:
                 if isinstance(item, QHBoxLayout):
                     vl.addLayout(item)
                 else:
                     vl.addWidget(item)
-            vl.addStretch()
             return w
 
         def _hrow(*widgets) -> QHBoxLayout:
@@ -676,10 +675,8 @@ class AdsTableWidget(QWidget):
         grid.addWidget(c11, 1, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
         grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
+        grid.setVerticalSpacing(8)
 
         group.setLayout(grid)
         parent_layout.addWidget(group)
