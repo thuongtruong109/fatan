@@ -1,4 +1,4 @@
-import sys, os, subprocess, shutil, json
+import sys, os, subprocess, shutil, json, time, ctypes
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout,
     QTableWidget, QTableWidgetItem, QHBoxLayout,
@@ -179,6 +179,9 @@ class CookieLoaderGUI(QWidget):
         # Create widgets that are always needed
         self.ads_table = AdsTableWidget(self.data_csv)
         self.ads_table.status_update.connect(self.update_status)
+        # Connect preview signals from table
+        self.ads_table.preview_requested.connect(self._on_table_preview_requested)
+        self.ads_table.preview_closed.connect(self._on_table_preview_closed)
 
         self.settings_widget = SettingsWidget(self.settings_file)
         self.settings_widget.settings_saved.connect(
@@ -198,6 +201,34 @@ class CookieLoaderGUI(QWidget):
         self.actions_widget.status_update.connect(self.update_status)
         self.apps_widget = ApplicationWidget()
         self.apps_widget.status_update.connect(self.update_status)
+
+        # Preview panel (hidden by default)
+        self.preview_panel = QWidget()
+        self.preview_panel.setVisible(False)
+        pv_layout = QVBoxLayout()
+        pv_layout.setContentsMargins(4, 4, 4, 4)
+        pv_layout.setSpacing(4)
+        self.preview_panel.setLayout(pv_layout)
+
+        self._preview_title = QLabel("Preview")
+        self._preview_title.setStyleSheet(
+            "font-weight: bold; font-size: 12px; padding: 2px 4px;"
+        )
+        pv_layout.addWidget(self._preview_title)
+
+        # Placeholder container — used only to measure position for the overlay window
+        self.preview_container = QWidget()
+        self.preview_container.setMinimumSize(300, 500)
+        self.preview_container.setStyleSheet("background: #111; border: 1px solid #555;")
+        pv_layout.addWidget(self.preview_container, 1)
+
+        # State for current preview
+        self._current_preview_serial = None
+        self._scrcpy_proc = None
+        self._embed_hwnd = 0          # Win32 HWND of embedded scrcpy window
+        self._reposition_timer = QTimer()
+        self._reposition_timer.setInterval(200)
+        self._reposition_timer.timeout.connect(self._reposition_scrcpy)
 
         # ── Left navigation panel ────────────────────────────────────────
         left_panel = QWidget()
@@ -455,7 +486,8 @@ class CookieLoaderGUI(QWidget):
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
-        layout.addWidget(right_panel)
+        layout.addWidget(right_panel, 1)
+        layout.addWidget(self.preview_panel)
         self.setLayout(layout)
 
         # Wire table row selection → update Info / Actions with selected serial
@@ -742,6 +774,158 @@ class CookieLoaderGUI(QWidget):
                 self.update_status(f'❌ Error opening remote for {serial}: {str(e)}')
 
         self.update_status(f'📱 Remote opened for {launched} device(s)')
+
+    def _on_table_preview_requested(self, serial: str):
+        """Called when AdsTable requests a preview for a serial."""
+        self.show_preview(serial)
+
+    def _on_table_preview_closed(self, serial: str):
+        """Called when AdsTable requests closing a preview."""
+        self.close_preview(serial)
+
+    def show_preview(self, serial: str):
+        """Launch scrcpy as a borderless popup overlaid on the preview container."""
+        if not serial:
+            self.update_status('No device serial provided for preview')
+            return
+
+        # Already previewing this exact device – nothing to do
+        if self._current_preview_serial == serial:
+            return
+
+        # Different device already open – close it first (re-enables its button)
+        if self._current_preview_serial:
+            self.close_preview(self._current_preview_serial)
+
+        scrcpy_exe = shutil.which("scrcpy") or r"C:\android-tools\scrcpy-win64-v3.3.4\scrcpy.exe"
+        if not os.path.isfile(scrcpy_exe) and shutil.which("scrcpy") is None:
+            self.update_status('❌ scrcpy not found. Please install scrcpy and add it to PATH.')
+            return
+
+        try:
+            proc = subprocess.Popen(
+                [scrcpy_exe, "-s", serial, "--window-title", serial,
+                 "--window-width", str(self.preview_width),
+                 "--window-height", str(self.preview_height),
+                 "--always-on-top"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._scrcpy_proc = proc
+            self._current_preview_serial = serial
+            self.preview_panel.setVisible(True)
+
+            # Disable the Preview button for this device
+            self.ads_table.set_preview_active(serial, True)
+
+            self.update_status(f'📱 Opening preview for: {serial}')
+
+            # On Windows: find the window, strip its title bar, then keep it
+            # positioned as a WS_POPUP overlay – this keeps input working.
+            self._embed_hwnd = 0
+            self._find_and_position_scrcpy(serial)
+
+        except Exception as e:
+            self.update_status(f'❌ Error opening preview for {serial}: {e}')
+
+    def _find_and_position_scrcpy(self, title: str, timeout: float = 6.0):
+        """Poll for the scrcpy HWND, strip its caption, then overlay it on
+        preview_container.  We use WS_POPUP (not WS_CHILD) so the window keeps
+        its own message loop and mouse/touch input continues to work correctly.
+        """
+        if os.name != 'nt':
+            return
+
+        user32 = ctypes.windll.user32
+        deadline = time.time() + timeout
+        hwnd = 0
+        while time.time() < deadline:
+            hwnd = user32.FindWindowW(None, ctypes.c_wchar_p(title))
+            if hwnd:
+                break
+            time.sleep(0.12)
+
+        if not hwnd:
+            self.update_status('⚠️ Could not find scrcpy window to position')
+            return
+
+        # Strip title bar / resize border; keep WS_POPUP so input is not broken
+        GWL_STYLE    = -16
+        WS_POPUP     = 0x80000000
+        WS_VISIBLE   = 0x10000000
+        WS_CAPTION   = 0x00C00000   # title bar (WS_BORDER | WS_DLGFRAME)
+        WS_THICKFRAME = 0x00040000  # resize grip
+
+        try:
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            style = (style | WS_POPUP | WS_VISIBLE) & ~(WS_CAPTION | WS_THICKFRAME)
+            user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+        except Exception as e:
+            self.update_status(f'⚠️ Could not restyle scrcpy window: {e}')
+
+        self._embed_hwnd = hwnd
+        self._reposition_scrcpy()
+        # Keep syncing position as the main window moves / resizes
+        self._reposition_timer.start()
+
+    def _reposition_scrcpy(self):
+        """Move/resize the scrcpy popup to exactly cover preview_container."""
+        if not self._embed_hwnd or os.name != 'nt':
+            return
+
+        # If scrcpy exited, auto-close
+        if self._scrcpy_proc and self._scrcpy_proc.poll() is not None:
+            self._reposition_timer.stop()
+            self.close_preview()
+            return
+
+        try:
+            user32 = ctypes.windll.user32
+            pos = self.preview_container.mapToGlobal(
+                self.preview_container.rect().topLeft()
+            )
+            x, y = pos.x(), pos.y()
+            w = self.preview_container.width()
+            h = self.preview_container.height()
+
+            SWP_NOZORDER   = 0x0004
+            SWP_SHOWWINDOW = 0x0040
+            SWP_NOACTIVATE = 0x0010
+            user32.SetWindowPos(
+                self._embed_hwnd, 0,
+                int(x), int(y), int(w), int(h),
+                SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
+
+    def close_preview(self, serial: str = None):
+        """Terminate scrcpy, re-enable table button, hide panel, restore window width."""
+        self._reposition_timer.stop()
+        self._embed_hwnd = 0
+
+        try:
+            if self._scrcpy_proc and self._scrcpy_proc.poll() is None:
+                self._scrcpy_proc.terminate()
+        except Exception:
+            pass
+
+        closed_serial = self._current_preview_serial
+        self._scrcpy_proc = None
+        self._current_preview_serial = None
+
+        # Re-enable the Preview button for the closed device
+        if closed_serial:
+            self.ads_table.set_preview_active(closed_serial, False)
+
+        self.preview_panel.setVisible(False)
+
+        # Let the window shrink back to its natural size
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16_777_215)
+        QTimer.singleShot(0, self.adjustSize)
+
+        self.update_status('Preview closed')
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

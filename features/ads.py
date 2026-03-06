@@ -168,6 +168,7 @@ def run_ads_automation(
 
 # GUI Components for Ads Management
 import sys, os, subprocess, shutil, json
+from functools import partial
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QTableWidget, QTableWidgetItem, QHBoxLayout, QDialog, QLineEdit, QLabel, QDialogButtonBox, QFormLayout, QStyledItemDelegate, QTextEdit, QSizePolicy, QGroupBox, QDoubleSpinBox, QSpinBox, QSlider, QFrame, QComboBox, QGridLayout
 from PySide6.QtCore import QTimer, QThread, Signal, Qt, QRect
 from PySide6.QtGui import QIcon
@@ -297,6 +298,8 @@ class AdsTableWidget(QWidget):
     """Widget containing the ads table with device management functionality."""
 
     status_update = Signal(str)
+    preview_requested = Signal(str)   # emitted when user clicks Preview button (serial)
+    preview_closed = Signal(str)      # emitted when user clicks Close button (serial)
 
     def __init__(self, data_csv="data.csv", parent=None):
         super().__init__(parent)
@@ -312,7 +315,7 @@ class AdsTableWidget(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Model', 'Proxy Type', 'Host:Port'])
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -839,7 +842,7 @@ class AdsTableWidget(QWidget):
 
             self.table.blockSignals(True)
             self.table.setRowCount(num_rows)
-            self.table.setColumnCount(6)
+            self.table.setColumnCount(7)
 
             non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
             editable = non_editable | Qt.ItemFlag.ItemIsEditable
@@ -873,6 +876,25 @@ class AdsTableWidget(QWidget):
                     ph.setFlags(non_editable)
                     ph.setForeground(Qt.GlobalColor.gray)
                     self.table.setItem(row_idx, col, ph)
+
+                # Preview column: contains Preview and Close buttons
+                preview_widget = QWidget()
+                ph_layout = QHBoxLayout(preview_widget)
+                ph_layout.setContentsMargins(2, 2, 2, 2)
+                ph_layout.setSpacing(4)
+                preview_btn = QPushButton("Preview")
+                preview_btn.setFixedSize(64, 24)
+                close_btn = QPushButton("Close")
+                close_btn.setFixedSize(48, 24)
+
+                # Connect buttons — use partial to capture serial
+                preview_btn.clicked.connect(partial(self._on_preview_clicked, serial))
+                close_btn.clicked.connect(partial(self._on_close_preview_clicked, serial))
+
+                ph_layout.addWidget(preview_btn)
+                ph_layout.addWidget(close_btn)
+                ph_layout.addStretch()
+                self.table.setCellWidget(row_idx, 6, preview_widget)
 
             self.table.setColumnWidth(0, 32)
             self.table.resizeColumnsToContents()
@@ -971,6 +993,38 @@ class AdsTableWidget(QWidget):
             CSVHelper.write_csv(self.data_csv, rows)
         except Exception as e:
             print(f"Error saving CSV: {e}")
+
+    # Preview button callbacks
+    def _on_preview_clicked(self, serial: str):
+        try:
+            self.preview_requested.emit(serial)
+        except Exception:
+            pass
+
+    def _on_close_preview_clicked(self, serial: str):
+        try:
+            self.preview_closed.emit(serial)
+        except Exception:
+            pass
+
+    def set_preview_active(self, serial: str, active: bool):
+        """Enable or disable the Preview button for the row matching `serial`.
+        When active=True the Preview button is disabled (greyed out).
+        """
+        for row in range(self.table.rowCount()):
+            serial_item = self.table.item(row, 2)
+            if serial_item and serial_item.text().strip() == serial:
+                cell_w = self.table.cellWidget(row, 6)
+                if cell_w:
+                    # The first child button is Preview
+                    btns = cell_w.findChildren(QPushButton)
+                    if btns:
+                        btns[0].setEnabled(not active)
+                        btns[0].setStyleSheet(
+                            "QPushButton { background: #bbb; color: #777; border-radius:3px; font-size:11px; }"
+                            if active else ""
+                        )
+                break
 
     def update_proxy_statuses(self, proxy_data: dict):
         """Update proxy status columns (4, 5) keyed by serial.

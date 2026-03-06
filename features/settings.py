@@ -89,6 +89,11 @@ class _DeviceControlWorker(QThread):
                     _shell(s, f"settings put system screen_brightness_mode 0; "
                               f"settings put system screen_brightness {val}")
                     results.append(f"✅ Brightness → {val} on {s}")
+                elif self.action == "volume":
+                    val = int(self.value)
+                    # STREAM_MUSIC = 3, setStreamVolume via media command
+                    _shell(s, f"media volume --stream 3 --set {val}")
+                    results.append(f"✅ Volume → {val} on {s}")
                 elif self.action == "disable_animations":
                     _shell(s, "settings put global window_animation_scale 0; "
                               "settings put global transition_animation_scale 0; "
@@ -115,7 +120,6 @@ class _DeviceControlWorker(QThread):
                 results.append(f"❌ {s}: {e}")
         self.finished.emit("\n".join(results) if results else "Done")
 
-
 class SettingsWidget(QWidget):
     """Settings form rendered as an inline tab content (no modal)."""
 
@@ -138,6 +142,10 @@ class SettingsWidget(QWidget):
         self._brightness_timer.setSingleShot(True)
         self._brightness_timer.setInterval(1000)
         self._brightness_timer.timeout.connect(self._apply_brightness)
+        self._volume_timer = QTimer()
+        self._volume_timer.setSingleShot(True)
+        self._volume_timer.setInterval(600)
+        self._volume_timer.timeout.connect(self._apply_volume_debounced)
         self._load()
         self._build_ui()
 
@@ -220,40 +228,36 @@ class SettingsWidget(QWidget):
         )
         _LABEL_SS = "font-size: 11px; color: #555; font-weight: bold;"
 
-        # ── Remote Preview ───────────────────────────────────────────────
-        preview_group = QGroupBox("📱 Remote preview")
-        preview_group.setStyleSheet(_GROUP_BLUE_SS)
-        prev_hl = QHBoxLayout()
-        prev_hl.setContentsMargins(10, 8, 10, 10)
-        prev_hl.setSpacing(10)
-
-        lbl_w = QLabel("Width (px):")
-        lbl_w.setStyleSheet(_LABEL_SS)
-        self._width_input = QLineEdit(str(self._data["preview_width"]))
-        self._width_input.setPlaceholderText("e.g. 400")
-        self._width_input.setMaximumWidth(100)
-        self._width_input.setStyleSheet(_INPUT_SS)
-        prev_hl.addWidget(lbl_w)
-        prev_hl.addWidget(self._width_input)
-
-        lbl_h = QLabel("Height (px):")
-        lbl_h.setStyleSheet(_LABEL_SS)
-        self._height_input = QLineEdit(str(self._data["preview_height"]))
-        self._height_input.setPlaceholderText("e.g. 800")
-        self._height_input.setMaximumWidth(100)
-        self._height_input.setStyleSheet(_INPUT_SS)
-        prev_hl.addWidget(lbl_h)
-        prev_hl.addWidget(self._height_input)
-        prev_hl.addStretch()
-        preview_group.setLayout(prev_hl)
-        vl.addWidget(preview_group)
-
         # ── Device Controls ──────────────────────────────────────────────
         ctrl_group = QGroupBox("🎛 Device Controls")
         ctrl_group.setStyleSheet(_GROUP_BLUE_SS)
         ctrl_vl = QVBoxLayout()
         ctrl_vl.setContentsMargins(12, 10, 12, 12)
         ctrl_vl.setSpacing(10)
+
+        lbl_w = QLabel("Width (px):")
+        lbl_w.setStyleSheet(_LABEL_SS)
+        self._width_input = QLineEdit(str(self._data["preview_width"]))
+        self._width_input.setPlaceholderText("e.g. 400")
+        self._width_input.setMaximumWidth(80)
+        self._width_input.setStyleSheet(_INPUT_SS)
+        lbl_h = QLabel("Height (px):")
+        lbl_h.setStyleSheet(_LABEL_SS)
+        self._height_input = QLineEdit(str(self._data["preview_height"]))
+        self._height_input.setPlaceholderText("e.g. 800")
+        self._height_input.setMaximumWidth(80)
+        self._height_input.setStyleSheet(_INPUT_SS)
+
+        # Width and Height on same row
+        row_wh = QHBoxLayout()
+        row_wh.setSpacing(8)
+        row_wh.addWidget(lbl_w)
+        row_wh.addWidget(self._width_input)
+        row_wh.addSpacing(16)
+        row_wh.addWidget(lbl_h)
+        row_wh.addWidget(self._height_input)
+        row_wh.addStretch()
+        ctrl_vl.addLayout(row_wh)
 
         # Row 1: Screen lock
         row_lock = QHBoxLayout()
@@ -333,7 +337,7 @@ class SettingsWidget(QWidget):
         row_toggles.addStretch()
         ctrl_vl.addLayout(row_toggles)
 
-        # Row 3: Brightness slider
+        # Row 3: Brightness + Volume on same row
         row_bright = QHBoxLayout()
         row_bright.setSpacing(8)
         lbl_bright = QLabel("☀ Brightness:")
@@ -345,13 +349,14 @@ class SettingsWidget(QWidget):
         self._brightness_slider.setMaximum(100)
         self._brightness_slider.setValue(50)
         self._brightness_slider.setSingleStep(1)
-        self._brightness_slider.setFixedWidth(180)
-        self._brightness_slider.setStyleSheet(
+        self._brightness_slider.setFixedWidth(140)
+        _SLIDER_SS = (
             "QSlider::groove:horizontal { height: 4px; background: #ddd; border-radius: 2px; }"
             "QSlider::handle:horizontal { background: #1976d2; border-radius: 6px;"
             " width: 14px; height: 14px; margin: -5px 0; }"
-            "QSlider::sub-page:horizontal { background: #1976d2; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #90caf9; border-radius: 2px; }"
         )
+        self._brightness_slider.setStyleSheet(_SLIDER_SS)
         self._bright_val_lbl = QLabel("50")
         self._bright_val_lbl.setStyleSheet("font-size: 11px; color: #333; min-width: 28px;")
         self._brightness_slider.valueChanged.connect(
@@ -362,18 +367,34 @@ class SettingsWidget(QWidget):
         )
         row_bright.addWidget(self._brightness_slider)
         row_bright.addWidget(self._bright_val_lbl)
+
+        # Volume slider (same row as Brightness)
+        row_bright.addSpacing(12)
+        lbl_vol = QLabel("🔊 Volume:")
+        lbl_vol.setStyleSheet(_LABEL_SS)
+        row_bright.addWidget(lbl_vol)
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setMinimum(0)
+        self._volume_slider.setMaximum(15)
+        self._volume_slider.setValue(7)
+        self._volume_slider.setSingleStep(1)
+        self._volume_slider.setFixedWidth(120)
+        self._volume_slider.setStyleSheet(_SLIDER_SS)
+        self._vol_val_lbl = QLabel("7")
+        self._vol_val_lbl.setStyleSheet("font-size: 11px; color: #333; min-width: 24px;")
+        self._volume_slider.valueChanged.connect(
+            lambda v: (
+                self._vol_val_lbl.setText(str(v)),
+                self._volume_timer.start(),
+            )
+        )
+        row_bright.addWidget(self._volume_slider)
+        row_bright.addWidget(self._vol_val_lbl)
         row_bright.addStretch()
         ctrl_vl.addLayout(row_bright)
 
         ctrl_group.setLayout(ctrl_vl)
         vl.addWidget(ctrl_group)
-
-        # ── Device Options ────────────────────────────────────────────────
-        opt_group = QGroupBox("⚙️ Device Options")
-        opt_group.setStyleSheet(_GROUP_BLUE_SS)
-        opt_vl = QVBoxLayout()
-        opt_vl.setContentsMargins(12, 10, 12, 12)
-        opt_vl.setSpacing(10)
 
         # Row A: Speed boost (disable/enable animations)
         row_anim = QHBoxLayout()
@@ -399,54 +420,51 @@ class SettingsWidget(QWidget):
         btn_anim_off.clicked.connect(lambda: self._device_action("enable_animations"))
         row_anim.addWidget(btn_anim_off)
         row_anim.addStretch()
-        opt_vl.addLayout(row_anim)
+        ctrl_vl.addLayout(row_anim)
 
-        # Row B: Dark mode
-        row_dark = QHBoxLayout()
-        row_dark.setSpacing(8)
+        # Row B+C: Dark mode and Stay on charging — same row
+        row_dark_stay = QHBoxLayout()
+        row_dark_stay.setSpacing(8)
+
         lbl_dark = QLabel("🌙 Dark Mode:")
         lbl_dark.setStyleSheet(_LABEL_SS)
-        lbl_dark.setFixedWidth(120)
-        row_dark.addWidget(lbl_dark)
+        lbl_dark.setFixedWidth(100)
+        row_dark_stay.addWidget(lbl_dark)
         btn_dark_on = QPushButton("ON")
         btn_dark_on.setStyleSheet(_BTN_ON_SS)
         btn_dark_on.setFixedHeight(28)
         btn_dark_on.setToolTip("adb shell cmd uimode night yes")
         btn_dark_on.clicked.connect(lambda: self._device_action("dark_mode_on"))
-        row_dark.addWidget(btn_dark_on)
+        row_dark_stay.addWidget(btn_dark_on)
         btn_dark_off = QPushButton("OFF")
         btn_dark_off.setStyleSheet(_BTN_OFF_SS)
         btn_dark_off.setFixedHeight(28)
         btn_dark_off.setToolTip("adb shell cmd uimode night no")
         btn_dark_off.clicked.connect(lambda: self._device_action("dark_mode_off"))
-        row_dark.addWidget(btn_dark_off)
-        row_dark.addStretch()
-        opt_vl.addLayout(row_dark)
+        row_dark_stay.addWidget(btn_dark_off)
 
-        # Row C: Stay on while charging
-        row_stay = QHBoxLayout()
-        row_stay.setSpacing(8)
+        row_dark_stay.addSpacing(12)
+
         lbl_stay = QLabel("🔌 Stay on (charging):")
         lbl_stay.setStyleSheet(_LABEL_SS)
-        lbl_stay.setFixedWidth(150)
-        row_stay.addWidget(lbl_stay)
+        row_dark_stay.addWidget(lbl_stay)
         btn_stay_on = QPushButton("ON")
         btn_stay_on.setStyleSheet(_BTN_ON_SS)
         btn_stay_on.setFixedHeight(28)
         btn_stay_on.setToolTip("adb shell settings put global stay_on_while_plugged_in 3")
         btn_stay_on.clicked.connect(lambda: self._device_action("stay_on_charging_on"))
-        row_stay.addWidget(btn_stay_on)
+        row_dark_stay.addWidget(btn_stay_on)
         btn_stay_off = QPushButton("OFF")
         btn_stay_off.setStyleSheet(_BTN_OFF_SS)
         btn_stay_off.setFixedHeight(28)
         btn_stay_off.setToolTip("adb shell settings put global stay_on_while_plugged_in 0")
         btn_stay_off.clicked.connect(lambda: self._device_action("stay_on_charging_off"))
-        row_stay.addWidget(btn_stay_off)
-        row_stay.addStretch()
-        opt_vl.addLayout(row_stay)
+        row_dark_stay.addWidget(btn_stay_off)
+        row_dark_stay.addStretch()
+        ctrl_vl.addLayout(row_dark_stay)
 
-        opt_group.setLayout(opt_vl)
-        vl.addWidget(opt_group)
+        ctrl_group.setLayout(ctrl_vl)
+        vl.addWidget(ctrl_group)
 
         # ── Device Actions ─────────────────────────────────────────────────
         setup_group = QGroupBox("🛠 Device Actions")
@@ -557,6 +575,14 @@ class SettingsWidget(QWidget):
         pct = self._brightness_slider.value()
         val = round(pct * 255 / 100)
         w = _DeviceControlWorker(serials, "brightness", value=val)
+        self._start_worker(w)
+
+    def _apply_volume_debounced(self):
+        serials = self._get_serials()
+        if not serials:
+            return
+        val = self._volume_slider.value()
+        w = _DeviceControlWorker(serials, "volume", value=val)
         self._start_worker(w)
 
     def _device_action(self, action: str):
