@@ -164,8 +164,6 @@ def run_ads_automation(
 
         return {"title": page_title, "domain": domain, "url": page_url}
 
-
-
 # GUI Components for Ads Management
 import sys, os, subprocess, shutil, json
 from functools import partial
@@ -301,7 +299,7 @@ class AdsTableWidget(QWidget):
     preview_requested = Signal(str)   # emitted when user clicks Preview button (serial)
     preview_closed = Signal(str)      # emitted when user clicks Close button (serial)
 
-    def __init__(self, data_csv="data.csv", parent=None):
+    def __init__(self, data_csv="data/data.csv", parent=None):
         super().__init__(parent)
         self.data_csv = data_csv
         self.initUI()
@@ -316,9 +314,18 @@ class AdsTableWidget(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Model', 'Proxy Type', 'Host:Port'])
+        self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Model', 'Proxy Type', 'Host:Port', 'Preview'])
         self.table.verticalHeader().hide()
-        self.table.horizontalHeader().setStretchLastSection(True)
+        hh = self.table.horizontalHeader()
+        hh.setStretchLastSection(False)
+        from PySide6.QtWidgets import QHeaderView
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)           # No
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)         # Device Name – takes remaining space
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Serial
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Model
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # Proxy Type
+        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # Host:Port
+        hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)           # Actions
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.mousePressEvent = self.table_mouse_press_event
@@ -882,23 +889,22 @@ class AdsTableWidget(QWidget):
                 ph_layout = QHBoxLayout(preview_widget)
                 ph_layout.setContentsMargins(2, 2, 2, 2)
                 ph_layout.setSpacing(4)
-                preview_btn = QPushButton("Preview")
-                preview_btn.setFixedSize(64, 24)
+                open_btn = QPushButton("Open")
+                open_btn.setFixedSize(64, 24)
                 close_btn = QPushButton("Close")
                 close_btn.setFixedSize(48, 24)
 
                 # Connect buttons — use partial to capture serial
-                preview_btn.clicked.connect(partial(self._on_preview_clicked, serial))
+                open_btn.clicked.connect(partial(self._on_preview_clicked, serial))
                 close_btn.clicked.connect(partial(self._on_close_preview_clicked, serial))
 
-                ph_layout.addWidget(preview_btn)
+                ph_layout.addWidget(open_btn)
                 ph_layout.addWidget(close_btn)
                 ph_layout.addStretch()
                 self.table.setCellWidget(row_idx, 6, preview_widget)
 
-            self.table.setColumnWidth(0, 32)
-            self.table.resizeColumnsToContents()
-            self.table.setColumnWidth(0, 32)
+            self.table.setColumnWidth(0, 36)   # No
+            self.table.setColumnWidth(6, 140)  # Actions (Preview + Close buttons)
             self.table.blockSignals(False)
 
             self.status_update.emit(f'Loaded {len(rows)} rows from CSV')

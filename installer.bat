@@ -1,16 +1,14 @@
 @echo off
-echo Installing ADB and scrcpy...
+echo Installing dependencies...
 
-@REM mkdir C:\android-tools
-@REM cd C:\android-tools
+mkdir C:\android-tools
+cd C:\android-tools
 
-@REM curl -L -o platform-tools.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-@REM tar -xf platform-tools.zip
-@REM del platform-tools.zip
+curl -L -o platform-tools.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+tar -xf platform-tools.zip
 
-@REM curl -L -o scrcpy.zip https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-win64-v3.3.4.zip
-@REM tar -xf scrcpy.zip
-@REM del scrcpy.zip
+curl -L -o scrcpy.zip https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-win64-v3.3.4.zip
+tar -xf scrcpy.zip
 
 for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "SYS_PATH=%%B"
 setx PATH "%SYS_PATH%;C:\android-tools\platform-tools;C:\android-tools\scrcpy-win64-v3.3.4" /M

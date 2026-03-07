@@ -1,7 +1,7 @@
 import os
 from utils.adb import adb, install_xapk
 
-def install_chrome(serial: str, apk_path: str = "chrome.apkm"):
+def install_chrome(serial: str, apk_path: str = "data/chrome.apkm"):
     ext = os.path.splitext(apk_path)[1].lower()
     if ext in (".xapk", ".apkm"):
         install_xapk(serial, apk_path)

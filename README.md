@@ -1,47 +1,63 @@
-# Fatan
+# Fatan — Android Device Manager & Ads Automation
 
-A comprehensive GUI tool for mobile automation that manages cookie files and performs automated TikTok cookie importing on Android devices using ADB.
+A multi-device Android management GUI and ads automation tool built with PySide6. Connect Android phones via ADB (USB or WiFi), control device settings in bulk, and run Chrome-based ads automation via Chrome DevTools Protocol (CDP).
 
 ## Features
 
-- **GUI Interface**: PySide6-based desktop application for easy cookie management
-- **Automated Cookie Import**: Automated workflow to import TikTok cookies into Firefox on mobile devices
-- **Device Management**: Automatic detection and management of connected Android devices
-- **CSV Data Management**: Built-in CSV helper utilities for data manipulation
-- **ADB Integration**: Full ADB command integration for device control
-- **Build Tools**: PyInstaller build scripts for creating executables
-- **Installer**: Automated setup script for ADB and scrcpy tools
+- **Multi-device Management**: Detect and manage multiple Android devices simultaneously
+- **Ads Automation**: Automate ad interactions in Chrome using CDP — navigates to the ad, clicks "Learn more", and performs human-like browsing behaviour
+- **Human-like Behaviour Engine**: Configurable scroll speed, burst probability, click probability, read pauses, and predefined profiles (e.g. light, normal, deep)
+- **Device Controls** (bulk, over ADB):
+  - Screen lock mode, brightness, media volume, Bluetooth
+  - WiFi / Mobile Data / Airplane mode toggles
+  - Dark mode, animation speed, stay-on-while-charging
+  - Reboot, Disable/Enable Play Store
+- **Proxy Management**: Assign HTTP proxies per device and verify connectivity
+- **Device Info**: Battery, storage, CPU, RAM, IP, uptime at a glance
+- **App Management**: List, install, and uninstall APKs on selected devices
+- **Screen Remote**: Live screen preview & control via embedded scrcpy window
+- **CSV Persistence**: Device names and serials stored in `data/data.csv`
+- **Build Tools**: PyInstaller build scripts for creating a standalone Windows executable
 
 ## Project Structure
 
-### Core Files
-
-- **`main.py`** - Main automation logic for ADB operations and cookie importing
-- **`gui.py`** - PySide6 GUI application for cookie management and device control
-- **`data.csv`** - CSV file containing device serials and cookie file mappings
-
-### Helper Modules
-
-- **`helpers/csv.py`** - CSV file manipulation utilities
-- **`helpers/file.py`** - File reading and processing utilities
-- **`utils/text.py`** - Text processing utilities for cookie extraction
-
-### Build & Installation
-
-- **`build.bat`** - Windows batch script to build executable using PyInstaller
-- **`installer.bat`** - Automated installer for ADB and scrcpy tools
-- **`build.spec`** - PyInstaller specification file
-- **`requirements.txt`** - Python dependencies
+```
+gui.py                  # Main PySide6 application entry-point
+features/
+  ads.py                # AdsTableWidget + human behaviour config UI
+  actions.py            # Per-device quick-action panel
+  apps.py               # App management panel
+  chrome.py             # Chrome APK installer helper
+  info.py               # Device info panel
+  proxy.py              # Proxy assignment & verification panel
+  session_engine.py     # Human-like browsing session engine
+  settings.py           # Settings tab (device controls, save/load JSON)
+helpers/
+  csv.py                # CSV read/write utilities
+utils/
+  adb.py                # ADB helper functions
+  appium_chrome.py      # Appium Chrome driver utilities
+  cdp_chrome.py         # ChromeCDP context manager (port forwarding + WS)
+  cdp_helpers.py        # InputDriver, safe-zone helpers
+data/
+  data.csv              # Persisted device list (model, serial, device name)
+  settings.json         # Saved UI settings (preview dimensions, etc.)
+  chrome.apkm           # Chrome APK bundle for installation
+build.bat               # PyInstaller build script
+installer.bat           # ADB + scrcpy installer for Windows
+requirements.txt        # Python dependencies
+```
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8+
-- Android device with USB debugging enabled
-- ADB (Android Debug Bridge) - automatically installed via `installer.bat`
+- Windows 10/11
+- Android device(s) with **USB debugging** enabled
+- ADB — installed automatically by `installer.bat`
 
-### Setup Steps
+### Setup
 
 1. **Clone the repository:**
 
@@ -62,223 +78,106 @@ A comprehensive GUI tool for mobile automation that manages cookie files and per
    installer.bat
    ```
 
-   This will download and install ADB and scrcpy to `C:\android-tools\`
+   This downloads and installs ADB and scrcpy to `C:\android-tools\`.
 
-4. **Restart your command prompt** to refresh the PATH environment variable.
+4. **Restart your terminal** to refresh the `PATH` environment variable.
 
 ## Usage
 
-### GUI Application
-
-1. **Launch the GUI:**
-
-   ```bash
-   python gui.py
-   ```
-
-2. **Load Cookies:**
-   - Click "Load Cookie" to select and upload `.txt` cookie files
-   - Files are automatically copied to the `cookies/` directory
-
-3. **Refresh Device Data:**
-   - Click "Refresh data" to scan connected devices and update the table
-   - Displays device model, serial, username, and associated cookie files
-
-4. **Setup ADB Keyboard:**
-   - Click "Setup Keyboard" to install ADB keyboard on all connected devices
-   - Required for automated text input
-
-5. **Start Automation:**
-   - Click "Start All" to begin the automated cookie import process for all devices
-
-### Manual ADB Setup
-
-Before using the automation, ensure your device is properly connected:
+### Launch the GUI
 
 ```bash
-# Enable TCP/IP mode on device
+python gui.py
+```
+
+### Workflow
+
+1. **Connect your device(s)** via USB or `adb connect <ip>:5555`
+2. Click **🔃 Load devices** to detect devices and populate the table
+3. Navigate tabs from the left sidebar:
+   - **🤖 Simulator** — set an ads URL, configure human behaviour, and click **Run Ads**
+   - **🔗 Proxy** — assign HTTP proxies to individual devices
+   - **⚙️ Settings** — bulk device controls (brightness, volume, Bluetooth, WiFi, etc.)
+   - **ℹ️ Info** — hardware and software info for the selected device
+   - **⚡ Actions** — quick per-device actions (open URL, input text, scroll, etc.)
+   - **📦 Apps** — list, install, and uninstall APKs
+
+### Connecting devices via WiFi
+
+```bash
+# Enable TCP/IP mode (with USB connected)
 adb tcpip 5555
 
-# Connect via WiFi (replace with your device IP)
+# Connect wirelessly
 adb connect 192.168.1.100:5555
 ```
 
-## Building Executable
+## Ads Automation Flow
 
-To create a standalone executable:
+For each device the automation:
+
+1. Opens the ads URL in Chrome via ADB
+2. Waits for the "Link to ad" modal to appear
+3. Scrolls the modal and clicks **Learn more**
+4. Lands on the destination page and collects title + domain
+5. Runs a configurable human-like browsing session (scroll, read pauses, random clicks)
+
+```
+Python app ─── ADB port-forward ──► Chrome mobile (port 9222)
+                                         │
+                                    CDP WebSocket
+```
+
+### Available CDP helpers (`utils/cdp_chrome.py`)
+
+| Method                  | Description                      |
+| ----------------------- | -------------------------------- |
+| `cdp.navigate(url)`     | Navigate to URL                  |
+| `cdp.execute_js(js)`    | Run JavaScript and return result |
+| `cdp.get_page_title()`  | Get current page title           |
+| `cdp.get_current_url()` | Get current URL                  |
+
+## Building a Standalone Executable
 
 ```bash
 build.bat
 ```
 
-This will generate:
-
-- `dist/gui.exe` - Main GUI executable
-- `dist/main.exe` - Command-line automation tool
-
-## Automation Flow
-
-The automation performs the following steps for each device:
-
-1. **Firefox Setup**: Opens Firefox and installs the Cookie Editor extension
-2. **Cookie Import**: Navigates to TikTok profile page and imports cookies
-3. **Text Input**: Uses ADB keyboard for automated text entry
-4. **Verification**: Opens profile page to verify successful import
+Output: `dist/gui.exe`
 
 ## Requirements
 
-- Python 3.8 or higher
-- PySide6 >= 6.0.0
-- PyInstaller >= 6.0.0 (for building)
-- Android device with Firefox installed
-- USB debugging enabled on device
-- ADB (automatically installed via installer)
+- Python 3.8+
+- PySide6 ≥ 6.0
+- websocket-client
+- PyInstaller ≥ 6.0 (build only)
+- Android device with Chrome installed
+- USB debugging enabled
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **ADB not found**: Run `installer.bat` and restart your command prompt
-2. **Device not detected**: Ensure USB debugging is enabled and device is authorized
-3. **Firefox not opening**: Verify Firefox is installed on the device
-4. **Cookie import fails**: Check cookie file format and Firefox extension installation
-
-### Device Connection
+| Problem                       | Solution                                                            |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `adb` not found               | Run `installer.bat` and restart your terminal                       |
+| Device not detected           | Enable USB debugging, accept the RSA fingerprint prompt on device   |
+| Chrome remote debugging fails | Install Chrome via **🌐 Install Chrome** button in the Settings tab |
+| `QLayout` warnings in console | Already fixed — update to latest version                            |
 
 ```bash
 # Check connected devices
 adb devices
 
-# Restart ADB server
-adb kill-server
-adb start-server
+# Restart ADB server if devices disappear
+adb kill-server && adb start-server
 ```
-
-## Chrome Automation Setup (CDP)
-
-The "Run Ads" feature uses Chrome DevTools Protocol (CDP) for browser automation on Android devices.
-
-### How it works
-
-```
-Python app → ADB forward port → Chrome mobile → CDP WebSocket
-```
-
-### Prerequisites
-
-- Chrome installed on Android device
-- ADB (already included)
-
-### Setup Steps
-
-1. **Install dependencies:**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Enable Chrome remote debugging:**
-
-   The app automatically:
-   - Starts Chrome with remote debugging
-   - Forwards ADB port 9222
-   - Connects via WebSocket
-
-### Usage
-
-1. Add ads URLs to the "Ads Link" column in the GUI
-2. Click "Run Ads" button
-3. CDP will automate Chrome on each device
-
-### Customization
-
-Edit the `run_ads_automation` function in `main.py` to add your specific automation logic:
-
-```python
-# Current implementation: Click element with text "Learn more"
-js_click = """
-const elements = Array.from(document.querySelectorAll('*')).filter(el =>
-    el.textContent && el.textContent.trim().toLowerCase().includes('learn more')
-);
-if (elements.length > 0) {
-    elements[0].click();
-    'clicked';
-} else {
-    'not_found';
-}
-"""
-result = cdp.execute_js(js_click)
-
-# Add more actions as needed:
-# cdp.click('.another-button')        # Click by CSS selector
-# time.sleep(2)                       # Wait for page changes
-# cdp.input_text('#input-field', 'text')  # Fill form fields
-```
-
-### Test Script
-
-Test your ads automation with a specific URL:
-
-```bash
-python test_ads.py "https://your-ads-url-here"
-```
-
-### Available CDP methods
-
-- `cdp.navigate(url)` - Go to URL
-- `cdp.click(selector)` - Click CSS selector
-- `cdp.input_text(selector, text)` - Type text into input field
-- `cdp.execute_js(js)` - Run JavaScript and return result
-- `cdp.get_page_title()` - Get page title
-
-### Text-based Element Finding
-
-For elements without reliable CSS selectors, use JavaScript to find by text content:
-
-```python
-# Find and click element containing "Learn more" (case-insensitive)
-js_click = """
-const elements = Array.from(document.querySelectorAll('*')).filter(el =>
-    el.textContent && el.textContent.trim().toLowerCase().includes('learn more')
-);
-if (elements.length > 0) {
-    elements[0].click();
-    'clicked';
-} else {
-    'not_found';
-}
-"""
-result = cdp.execute_js(js_click)
-```
-
-### Demo Script
-
-Run the demo to see CDP in action:
-
-```bash
-python demo_cdp.py
-```
-
-### Error Handling
-
-The automation is designed to be robust:
-
-- If an element is not found, it logs a warning but continues
-- Network timeouts are handled gracefully
-- Chrome crashes are automatically recovered
-
-Check the console output for detailed logs during automation.
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Commit your changes
+4. Submit a pull request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-<!-- https://cdn-icons-png.flaticon.com/32/3064/3064836.png -->
+This project is licensed under the MIT License.

@@ -7,7 +7,6 @@ Key improvements over the monolithic ``ads.py``:
   - Coordinate clamping on BOTH top & bottom (was only bottom).
   - Dynamic viewport width in zigzag (was hard-coded 350).
   - Motion variants (flash / zigzag / stutter) use safe-zone from zone dict.
-  - All ADB calls go through ``device_io`` (timeout + rate-limit).
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from utils.cdp_chrome import ChromeCDP
 
-from utils.device_io import adb_swipe, adb_tap, adb_back
+from utils.adb import adb_swipe, adb_tap, adb_back
 from utils.cdp_helpers import (
     get_webpage_safe_zone,
     get_clickable_elements,

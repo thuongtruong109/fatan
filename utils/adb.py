@@ -106,7 +106,7 @@ def install_xapk(serial: str, xapk_path: str):
 
 def setup_adb_keyboard(
     serial: str,
-    apk_path: str = "keyboard.apk",
+    apk_path: str = "data/keyboard.apk",
     ime: str = "com.android.adbkeyboard/.AdbIME"
 ):
     adb(serial, "install", "-r", apk_path)
@@ -114,7 +114,7 @@ def setup_adb_keyboard(
     adb(serial, "shell", "ime", "set", ime)
 
 # ---------------------------------------------------------------------------
-# Device I/O layer — migrated from utils/device_io.py
+# Device I/O layer
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("fatan.adb")

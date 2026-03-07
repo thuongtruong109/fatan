@@ -39,11 +39,9 @@ if %errorlevel% equ 0 (
     for %%A in ("dist\fatan.exe") do echo   %%~zA bytes
     echo.
     echo Copying dependencies folder to dist...
-    xcopy /E /I /Y cookies dist\cookies
-    copy /Y data.csv dist\data.csv
-    copy /Y keyboard.apk dist\keyboard.apk
-    copy /Y icon.png dist\icon.png
+    xcopy /E /I /Y data dist\data
     copy /Y installer.bat dist\installer.bat
+    copy /Y how-to-run.txt dist\how-to-run.txt
     echo.
 ) else (
     echo.

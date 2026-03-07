@@ -21,7 +21,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from utils.cdp_chrome import ChromeCDP
 
-from utils.device_io import adb_tap, adb_swipe
+from utils.adb import adb_tap, adb_swipe
 
 logger = logging.getLogger("fatan.cdp_helpers")
 

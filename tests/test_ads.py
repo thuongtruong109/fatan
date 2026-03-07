@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
-"""
-Test script for ads automation with modal detection.
-"""
 
-import sys
-import os
-import csv
+import sys, os, csv
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from main import run_ads_automation
+from features.ads import run_ads_automation
 
 def test_ads():
-    # Đọc URL từ data.csv
+    # Đọc URL từ data/data.csv
     ads_url = None
     device_serial = None
 
     try:
-        with open('data.csv', 'r', newline='', encoding='utf-8') as f:
+        with open('data/data.csv', 'r', newline='', encoding='utf-8') as f:
             reader = csv.reader(f)
             for row in reader:
                 if len(row) >= 3:
@@ -24,11 +19,11 @@ def test_ads():
                     ads_url = row[2]        # Ads link
                     break
     except FileNotFoundError:
-        print("data.csv not found")
+        print("data/data.csv not found")
         return
 
     if not ads_url or not device_serial:
-        print("No ads URL or device serial found in data.csv")
+        print("No ads URL or device serial found in data/data.csv")
         return
 
     try:

@@ -139,26 +139,6 @@ adb shell input swipe 300 1000 300 300
 adb shell input text hello
 ```
 
-# 🚀 1. Điều khiển Android hoàn toàn từ PC
-
-ADB có thể **giả lập gần như mọi thao tác người dùng**.
-
-### Bấm phím hệ thống
-
-```bash
-adb shell input keyevent 3
-```
-
-Ví dụ keyevent phổ biến:
-
-- `3` → Home
-- `4` → Back
-- `26` → Power
-- `24` → Volume Up
-- `25` → Volume Down
-
-👉 Có thể viết **script auto điều khiển điện thoại**.
-
 # 🤖 2. Automation Android (bot)
 
 Kết hợp:
@@ -178,25 +158,6 @@ Ví dụ swipe:
 ```bash
 adb shell input swipe 500 1500 500 500 200
 ```
-
-# 🖥 3. Mirror màn hình Android realtime
-
-Dùng tool dựa trên ADB như **scrcpy**
-
-Tính năng:
-
-- mirror màn hình
-- điều khiển bằng chuột
-- độ trễ cực thấp
-- không cần root
-
-Chỉ cần:
-
-```bash
-scrcpy
-```
-
-👉 Đây là **tool ADB mạnh nhất hiện nay**.
 
 # 📦 4. Dump toàn bộ thông tin hệ thống
 
@@ -261,8 +222,6 @@ Reset:
 ```bash
 adb shell wm density reset
 ```
-
-👉 Có thể **zoom UI Android**.
 
 # 📱 8. Thay đổi resolution
 
@@ -352,22 +311,11 @@ Xem:
 
 - flash ROM
 - unlock bootloader
-- trích xuất APK từ máy
-- reverse engineering app
-- điều khiển Android bằng AI
 - remote debugging
-- build Android automation system
 
-* 📱 **mirror màn hình Android lên PC**
-* 🤖 **auto control Android bằng script**
 * 🧹 **debloat toàn bộ app rác**
-* 🎮 **giả lập input để test game**
-* 🔍 **debug app chuyên sâu**
 
 - **gỡ app hệ thống không cần root**
-- **bật các tính năng ẩn của Android**
-- **điều khiển thiết bị từ script**
-- **test automation**
 - **ghi log kernel**
 - **port ROM / mod hệ thống**
 
@@ -526,12 +474,6 @@ Sau đó:
 adb pull /sdcard/window_dump.xml
 ```
 
-👉 Rất quan trọng cho:
-
-- automation
-- bot
-- UI testing
-
 # 🌐 14. Điều khiển Android qua network
 
 ADB có thể chạy qua WiFi:
@@ -603,8 +545,6 @@ Values:
 
 1 landscape
 
-9️⃣ Bật tắt Bluetooth
-adb shell service call bluetooth_manager 6
 🔟 Chụp screenshot không lưu file
 adb exec-out screencap -p > screenshot.png
 

@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QLabel, QLineEdit, QTextEdit, QGroupBox, QComboBox,
 )
 from PySide6.QtCore import QTimer, QThread, Signal, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QCloseEvent
 
 _ANDROID_TOOLS_PATHS = [
     r"C:\android-tools\platform-tools",
@@ -147,9 +147,9 @@ class CookieLoaderGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.app_name = "Fatan"
-        self.icon = "icon.png"
-        self.data_csv = "data.csv"
-        self.settings_file = "settings.json"
+        self.icon = "data/icon.png"
+        self.data_csv = "data/data.csv"
+        self.settings_file = "data/settings.json"
 
         self.status_timer = QTimer()
         self.status_timer.setSingleShot(True)
@@ -162,7 +162,7 @@ class CookieLoaderGUI(QWidget):
 
     @property
     def preview_width(self) -> int:
-        return self.settings_widget.get("preview_width", 400)
+        return self.settings_widget.get("preview_width", 300)
 
     @property
     def preview_height(self) -> int:
@@ -926,6 +926,12 @@ class CookieLoaderGUI(QWidget):
         QTimer.singleShot(0, self.adjustSize)
 
         self.update_status('Preview closed')
+
+    def closeEvent(self, event: QCloseEvent):
+        """Ensure scrcpy preview is closed when the app is closing."""
+        if self._current_preview_serial:
+            self.close_preview()
+        event.accept()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-"""
-Demo script: Chrome CDP automation examples
 
-Chạy script này để test các tính năng CDP:
-    python demo_cdp.py
-"""
-
-import sys
-import os
+import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from utils.cdp_chrome import ChromeCDP

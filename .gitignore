@@ -1,6 +1,6 @@
 __pycache__
-cookies
 build
 dist
 *.exe
 *.dll
+*.txt
