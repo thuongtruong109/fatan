@@ -122,6 +122,19 @@ class _DeviceControlWorker(QThread):
                 elif self.action == "stay_on_charging_off":
                     _shell(s, "settings put global stay_on_while_plugged_in 0")
                     results.append(f"✅ Stay on while charging OFF on {s}")
+                elif self.action == "set_dpi":
+                    val = int(self.value)
+                    _shell(s, f"wm density {val}")
+                    results.append(f"✅ DPI → {val} on {s}")
+                elif self.action == "reset_dpi":
+                    _shell(s, "wm density reset")
+                    results.append(f"✅ DPI reset on {s}")
+                elif self.action == "set_resolution":
+                    _shell(s, f"wm size {self.value}")
+                    results.append(f"✅ Resolution → {self.value} on {s}")
+                elif self.action == "reset_resolution":
+                    _shell(s, "wm size reset")
+                    results.append(f"✅ Resolution reset on {s}")
             except Exception as e:
                 results.append(f"❌ {s}: {e}")
         self.finished.emit("\n".join(results) if results else "Done")
@@ -252,7 +265,7 @@ class SettingsWidget(QWidget):
         lbl_h.setStyleSheet(_LABEL_SS)
         lbl_h.setFixedWidth(80)
         self._height_input = QLineEdit(str(self._data["preview_height"]))
-        self._height_input.setPlaceholderText("e.g. 800")
+        self._height_input.setPlaceholderText("e.g. 600")
         self._height_input.setMaximumWidth(80)
         self._height_input.setStyleSheet(_INPUT_SS)
 
@@ -501,6 +514,72 @@ class SettingsWidget(QWidget):
         ctrl_group.setLayout(ctrl_vl)
         vl.addWidget(ctrl_group)
 
+        # ── Display Settings (DPI + Resolution) ────────────────────────
+        display_group = QGroupBox("🖥 Display Settings")
+        display_group.setStyleSheet(_GROUP_BLUE_SS)
+        display_vl = QVBoxLayout()
+        display_vl.setContentsMargins(12, 10, 12, 12)
+        display_vl.setSpacing(10)
+
+        # DPI row
+        row_dpi = QHBoxLayout()
+        row_dpi.setSpacing(8)
+        lbl_dpi = QLabel("🧠 DPI density:")
+        lbl_dpi.setStyleSheet(_LABEL_SS)
+        lbl_dpi.setFixedWidth(100)
+        row_dpi.addWidget(lbl_dpi)
+        self._dpi_input = QLineEdit()
+        self._dpi_input.setPlaceholderText("e.g. 300")
+        self._dpi_input.setMaximumWidth(80)
+        self._dpi_input.setStyleSheet(_INPUT_SS)
+        self._dpi_input.setToolTip("adb shell wm density <value>")
+        row_dpi.addWidget(self._dpi_input)
+        btn_dpi_set = QPushButton("✔ Set DPI")
+        btn_dpi_set.setStyleSheet(_BTN_ON_SS)
+        btn_dpi_set.setFixedHeight(26)
+        btn_dpi_set.setToolTip("adb shell wm density <value>")
+        btn_dpi_set.clicked.connect(self._apply_dpi)
+        row_dpi.addWidget(btn_dpi_set)
+        btn_dpi_reset = QPushButton("↩ Reset DPI")
+        btn_dpi_reset.setStyleSheet(_BTN_OFF_SS)
+        btn_dpi_reset.setFixedHeight(26)
+        btn_dpi_reset.setToolTip("adb shell wm density reset")
+        btn_dpi_reset.clicked.connect(lambda: self._device_action("reset_dpi"))
+        row_dpi.addWidget(btn_dpi_reset)
+        row_dpi.addStretch()
+        display_vl.addLayout(row_dpi)
+
+        # Resolution row
+        row_res = QHBoxLayout()
+        row_res.setSpacing(8)
+        lbl_res = QLabel("📱 Resolution:")
+        lbl_res.setStyleSheet(_LABEL_SS)
+        lbl_res.setFixedWidth(100)
+        row_res.addWidget(lbl_res)
+        self._res_input = QLineEdit()
+        self._res_input.setPlaceholderText("e.g. 1080x1920")
+        self._res_input.setMaximumWidth(110)
+        self._res_input.setStyleSheet(_INPUT_SS)
+        self._res_input.setToolTip("adb shell wm size <WxH>  e.g. 1080x1920")
+        row_res.addWidget(self._res_input)
+        btn_res_set = QPushButton("✔ Set Size")
+        btn_res_set.setStyleSheet(_BTN_ON_SS)
+        btn_res_set.setFixedHeight(26)
+        btn_res_set.setToolTip("adb shell wm size <WxH>")
+        btn_res_set.clicked.connect(self._apply_resolution)
+        row_res.addWidget(btn_res_set)
+        btn_res_reset = QPushButton("↩ Reset Size")
+        btn_res_reset.setStyleSheet(_BTN_OFF_SS)
+        btn_res_reset.setFixedHeight(26)
+        btn_res_reset.setToolTip("adb shell wm size reset")
+        btn_res_reset.clicked.connect(lambda: self._device_action("reset_resolution"))
+        row_res.addWidget(btn_res_reset)
+        row_res.addStretch()
+        display_vl.addLayout(row_res)
+
+        display_group.setLayout(display_vl)
+        vl.addWidget(display_group)
+
         # ── Device Actions ─────────────────────────────────────────────────
         setup_group = QGroupBox("🛠 Device Actions")
         setup_group.setStyleSheet(_GROUP_BLUE_SS)
@@ -592,6 +671,35 @@ class SettingsWidget(QWidget):
 
     def _get_serials(self) -> list[str]:
         return self._get_serials_fn() if callable(self._get_serials_fn) else []
+
+    def _apply_dpi(self):
+        serials = self._get_serials()
+        if not serials:
+            self._status_label.setStyleSheet("color: #c62828; font-size: 12px;")
+            self._status_label.setText("⚠ No devices found.")
+            return
+        raw = self._dpi_input.text().strip()
+        if not raw.isdigit():
+            self._status_label.setStyleSheet("color: #c62828; font-size: 12px;")
+            self._status_label.setText("⚠ DPI must be a number (e.g. 300).")
+            return
+        w = _DeviceControlWorker(serials, "set_dpi", value=int(raw))
+        self._start_worker(w)
+
+    def _apply_resolution(self):
+        serials = self._get_serials()
+        if not serials:
+            self._status_label.setStyleSheet("color: #c62828; font-size: 12px;")
+            self._status_label.setText("⚠ No devices found.")
+            return
+        raw = self._res_input.text().strip()
+        import re as _re
+        if not _re.match(r"^\d+x\d+$", raw):
+            self._status_label.setStyleSheet("color: #c62828; font-size: 12px;")
+            self._status_label.setText("⚠ Format must be WxH (e.g. 1080x1920).")
+            return
+        w = _DeviceControlWorker(serials, "set_resolution", value=raw)
+        self._start_worker(w)
 
     def _apply_screen_lock(self):
         serials = self._get_serials()

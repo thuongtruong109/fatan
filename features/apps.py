@@ -221,6 +221,42 @@ class _AppActionWorker(QThread):
                         self.progress.emit(f"⏹ Force stopping {pkg}…")
                         _shell(self.serial, f"am force-stop {pkg}")
                         results.append(f"✅ Force-stopped {pkg}")
+                    elif self.action == "pull_apk":
+                        self.progress.emit(f"📦 Pulling APK for {pkg}…")
+                        path_raw = _shell(self.serial,
+                                          f"pm path {pkg}", timeout=10)
+                        m = re.search(r"package:(.+)", path_raw)
+                        if not m:
+                            results.append(f"❌ Cannot find APK path for {pkg}")
+                            continue
+                        apk_device = m.group(1).strip()
+                        # Save alongside apk_path (passed via constructor) or fallback to Desktop
+                        if self.apk_path:
+                            save_dir = self.apk_path
+                        else:
+                            save_dir = os.path.join(
+                                os.path.expanduser("~"), "Desktop"
+                            )
+                        os.makedirs(save_dir, exist_ok=True)
+                        local_file = os.path.join(save_dir, f"{pkg}.apk")
+                        self.progress.emit(
+                            f"  ↳ {apk_device}  →  {local_file}"
+                        )
+                        r = subprocess.run(
+                            ["adb", "-s", self.serial, "pull",
+                             apk_device, local_file],
+                            startupinfo=_si, capture_output=True,
+                            text=True, timeout=120,
+                        )
+                        out = (r.stdout + r.stderr).strip()
+                        if r.returncode == 0:
+                            results.append(
+                                f"✅ Pulled APK → {local_file}"
+                            )
+                        else:
+                            results.append(
+                                f"❌ Pull failed for {pkg}: {out[:200]}"
+                            )
                 except Exception as e:
                     results.append(f"❌ {pkg}: {e}")
 
@@ -252,6 +288,7 @@ class ApplicationWidget(QWidget):
         self._clear_btn.setEnabled(False)
         self._force_stop_btn.setEnabled(False)
         self._reinstall_btn.setEnabled(False)
+        self._pull_apk_btn.setEnabled(False)
         if not has:
             self._app_table.setRowCount(0)
 
@@ -379,6 +416,17 @@ class ApplicationWidget(QWidget):
         self._reinstall_btn.clicked.connect(lambda: self._run_action("reinstall_apk"))
         act_row1.addWidget(self._reinstall_btn)
 
+        self._pull_apk_btn = QPushButton("⬇ Pull APK")
+        self._pull_apk_btn.setStyleSheet(_BTN_SS)
+        self._pull_apk_btn.setMinimumHeight(32)
+        self._pull_apk_btn.setEnabled(False)
+        self._pull_apk_btn.setToolTip(
+            "Pull the selected app's APK from the device to a folder on PC\n"
+            "adb pull /data/app/<pkg>/base.apk"
+        )
+        self._pull_apk_btn.clicked.connect(self._pull_apk_to_pc)
+        act_row1.addWidget(self._pull_apk_btn)
+
         act_vl.addLayout(act_row1)
 
         # Row 2: install from APK
@@ -489,6 +537,7 @@ class ApplicationWidget(QWidget):
         self._clear_btn.setEnabled(has_sel and has_dev)
         self._force_stop_btn.setEnabled(has_sel and has_dev)
         self._reinstall_btn.setEnabled(has_sel and has_dev)
+        self._pull_apk_btn.setEnabled(has_sel and has_dev)
 
     def _selected_packages(self) -> list[str]:
         rows = self._app_table.selectionModel().selectedRows()
@@ -539,6 +588,22 @@ class ApplicationWidget(QWidget):
                 return
         self._run_action(action)
 
+    def _pull_apk_to_pc(self):
+        """Ask user for a save folder then pull the selected app's APK to PC."""
+        pkgs = self._selected_packages()
+        if not pkgs:
+            return
+        save_dir = QFileDialog.getExistingDirectory(
+            self, "Select folder to save APK(s)"
+        )
+        if not save_dir:
+            return
+        # Reuse the generic worker with apk_path = save_dir
+        worker = _AppActionWorker(
+            self._serial, "pull_apk", pkgs, apk_path=save_dir
+        )
+        self._run_action_worker(worker)
+
     def _run_action(self, action: str):
         pkgs = self._selected_packages()
         if not pkgs and action not in ("install_apk",):
@@ -582,5 +647,6 @@ class ApplicationWidget(QWidget):
 
     def _set_actions_enabled(self, enabled: bool):
         for btn in (self._uninstall_btn, self._clear_btn, self._reinstall_btn,
-                    self._force_stop_btn, self._install_btn, self._refresh_btn):
+                    self._force_stop_btn, self._install_btn, self._refresh_btn,
+                    self._pull_apk_btn):
             btn.setEnabled(enabled)

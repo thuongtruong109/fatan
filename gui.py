@@ -27,6 +27,7 @@ from features.proxy import ProxyWidget
 from features.info import DeviceInfoWidget
 from features.actions import ActionsWidget
 from features.apps import ApplicationWidget
+from features.files import FilesWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -166,7 +167,7 @@ class CookieLoaderGUI(QWidget):
 
     @property
     def preview_height(self) -> int:
-        return self.settings_widget.get("preview_height", 800)
+        return self.settings_widget.get("preview_height", 600)
 
     def initUI(self):
         self.setWindowTitle(self.app_name)
@@ -201,6 +202,8 @@ class CookieLoaderGUI(QWidget):
         self.actions_widget.status_update.connect(self.update_status)
         self.apps_widget = ApplicationWidget()
         self.apps_widget.status_update.connect(self.update_status)
+        self.files_widget = FilesWidget()
+        self.files_widget.status_update.connect(self.update_status)
 
         # Preview panel (hidden by default)
         self.preview_panel = QWidget()
@@ -288,6 +291,10 @@ class CookieLoaderGUI(QWidget):
         self.apps_button = _nav_btn('📦 Apps')
         self.apps_button.clicked.connect(lambda: self._open_tab(5))
         left_layout.addWidget(self.apps_button)
+
+        self.files_button = _nav_btn('📁 Files')
+        self.files_button.clicked.connect(lambda: self._open_tab(6))
+        left_layout.addWidget(self.files_button)
 
         self.run_ads_button = QPushButton('Run Ads')
         self.run_ads_button.clicked.connect(self.run_ads_for_all)
@@ -483,6 +490,9 @@ class CookieLoaderGUI(QWidget):
         # Page 5 – Applications      # index 5
         self.tab_body.addWidget(self.apps_widget)
 
+        # Page 6 – Files      # index 6
+        self.tab_body.addWidget(self.files_widget)
+
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
@@ -525,6 +535,7 @@ class CookieLoaderGUI(QWidget):
             self.info_button,
             self.actions_button,
             self.apps_button,
+            self.files_button,
         ]
         self.current_active_tab = _tab_buttons[index]
         self.current_active_tab.setChecked(True)
@@ -584,12 +595,15 @@ class CookieLoaderGUI(QWidget):
         self.actions_widget.set_device(serial)
         self.info_widget.set_device(serial)
         self.apps_widget.set_device(serial)
+        self.files_widget.set_device(serial)
 
         # Only auto-load Info if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:
             self.info_widget.load_device(serial)
         elif self.tab_body.isVisible() and self.tab_body.currentIndex() == 5:
             self.apps_widget.load_device(serial)
+        elif self.tab_body.isVisible() and self.tab_body.currentIndex() == 6:
+            self.files_widget.load_device(serial)
         else:
             # Store serial so it loads when user switches to the Info tab
             self.info_widget._serial = serial
@@ -603,6 +617,8 @@ class CookieLoaderGUI(QWidget):
             self.info_widget.load_device(self.info_widget._serial)
         elif index == 5 and self.apps_widget._serial:
             self.apps_widget.load_device(self.apps_widget._serial)
+        elif index == 6 and self.files_widget._serial:
+            self.files_widget.load_device(self.files_widget._serial)
 
     def stop_ads(self):
         """Signal the running worker to stop after the current device."""

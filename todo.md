@@ -1,19 +1,3 @@
-## Quản lý file
-
-ADB có thể hoạt động như một **file manager qua terminal**.
-
-- Copy file từ PC → điện thoại
-
-  ```bash
-  adb push file.txt /sdcard/
-  ```
-
-- Copy file từ điện thoại → PC
-
-  ```bash
-  adb pull /sdcard/file.txt
-  ```
-
 ## Mở shell điều khiển Android
 
 Chạy lệnh Linux trực tiếp trên máy:
@@ -31,8 +15,6 @@ Ví dụ:
 
 ## Ghi log hệ thống (debug)
 
-Rất quan trọng cho dev:
-
 ```bash
 adb logcat
 ```
@@ -41,7 +23,7 @@ Dùng để:
 
 - debug app crash
 - xem lỗi hệ thống
-- theo dõi hoạt động app
+- ## theo dõi hoạt động app
 
 ## Chụp màn hình / quay màn hình
 
@@ -209,32 +191,6 @@ Biết được:
 - CPU usage
 - network usage
 
-# 🧠 7. Thay đổi DPI màn hình
-
-Giả lập độ phân giải khác:
-
-```bash
-adb shell wm density 300
-```
-
-Reset:
-
-```bash
-adb shell wm density reset
-```
-
-# 📱 8. Thay đổi resolution
-
-```bash
-adb shell wm size 1080x1920
-```
-
-Reset:
-
-```bash
-adb shell wm size reset
-```
-
 # 🔐 9. Cấp quyền đặc biệt cho app
 
 Một số app cần quyền hệ thống.
@@ -325,36 +281,6 @@ gỡ app rác hệ thống:
 ```bash
 adb shell pm uninstall -k --user 0 com.facebook.appmanager
 ```
-
-# 🧠 1. Trích xuất APK từ điện thoại
-
-Bạn có thể **lấy file APK của app đã cài**.
-
-### Bước 1: tìm package
-
-```bash
-adb shell pm list packages
-```
-
-### Bước 2: lấy đường dẫn APK
-
-```bash
-adb shell pm path com.example.app
-```
-
-Ví dụ trả về:
-
-```
-package:/data/app/com.example.app/base.apk
-```
-
-### Bước 3: pull về máy tính
-
-```bash
-adb pull /data/app/com.example.app/base.apk
-```
-
-👉 Dùng để **backup hoặc reverse engineering app**.
 
 # 🔎 2. Xem activity của app
 

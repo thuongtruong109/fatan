@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo   Mobile Cookie Importer Builder
+echo   Fatan Builder
 echo ========================================
 echo.
 

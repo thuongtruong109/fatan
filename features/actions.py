@@ -1,11 +1,3 @@
-"""
-Actions tab.
-Provides quick device actions for the selected device:
-  • Setup Keyboard  — install ADB keyboard on all devices
-  • Install Chrome  — install Chrome on all devices
-  • Open URL        — opens any URL in Chrome via ADB intent
-  • Login Gmail     — fills Google account credentials in Chrome
-"""
 from __future__ import annotations
 
 import subprocess
