@@ -6,8 +6,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox,
     QCheckBox, QComboBox, QScrollArea, QFrame, QSizePolicy,
+    QFileDialog, QSpinBox,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QColor
 
 # ── ADB bootstrap ────────────────────────────────────────────────────────
 _si = subprocess.STARTUPINFO()
@@ -266,6 +268,9 @@ class _FetchWorker(QThread):
                 if wifi_name in ("<unknown ssid>", "0x", ""):
                     wifi_name = ""
 
+            # ── Uptime ────────────────────────────────────────────────────
+            uptime = _shell(s, "uptime")
+
             self.result.emit({
                 "brand":         brand,
                 "model":         model,
@@ -285,6 +290,7 @@ class _FetchWorker(QThread):
                 "latitude":      lat,
                 "longitude":     lon,
                 "wifi_name":     wifi_name,
+                "uptime":        uptime,
             })
         except Exception as e:
             self.error.emit(str(e))
@@ -440,7 +446,6 @@ _FIELD_SS = (
     "  min-height: 20px;"
     "}"
     "QLineEdit:read-only { background: #f7f9ff; }"
-    "QLineEdit:focus { border: 1px solid #1976d2; }"
 )
 
 _LABEL_SS = "color: #555; font-size: 11px; font-weight: bold;"
@@ -480,6 +485,104 @@ _BTN_SECONDARY_SS = (
 
 _CB_SS = "QCheckBox { font-size: 11px; color: #333; }"
 
+# ── Metrics Worker ──────────────────────────────────────────────────────
+class _MetricsWorker(QThread):
+    cpu_ready = Signal(float)
+    ram_ready = Signal(int, int)
+    battery_ready = Signal(int, bool)
+
+    def __init__(self, serial: str):
+        super().__init__()
+        self.serial = serial
+        self._running = True
+
+    def run(self):
+        s = self.serial
+        while self._running:
+            try:
+                # ── CPU Usage ─────────────────────────────────────────────
+                try:
+                    # Get CPU usage from /proc/stat
+                    stat1 = _shell(s, "cat /proc/stat | head -1", timeout=5)
+                    time.sleep(0.1)  # Small delay for CPU measurement
+                    stat2 = _shell(s, "cat /proc/stat | head -1", timeout=5)
+
+                    # Parse CPU times
+                    def parse_cpu_line(line: str) -> list[int]:
+                        parts = line.split()
+                        if len(parts) < 8:
+                            return []
+                        return [int(x) for x in parts[1:8]]
+
+                    cpu1 = parse_cpu_line(stat1)
+                    cpu2 = parse_cpu_line(stat2)
+
+                    if cpu1 and cpu2:
+                        total1 = sum(cpu1)
+                        total2 = sum(cpu2)
+                        idle1 = cpu1[3]  # idle time
+                        idle2 = cpu2[3]
+
+                        total_diff = total2 - total1
+                        idle_diff = idle2 - idle1
+
+                        if total_diff > 0:
+                            cpu_pct = 100.0 * (1.0 - idle_diff / total_diff)
+                            self.cpu_ready.emit(max(0.0, min(100.0, cpu_pct)))
+                except Exception:
+                    pass
+
+                # ── RAM Usage ─────────────────────────────────────────────
+                try:
+                    meminfo = _shell(s, "cat /proc/meminfo | head -3", timeout=5)
+                    mem_total = mem_used = 0
+
+                    for line in meminfo.splitlines():
+                        if line.startswith("MemTotal:"):
+                            mem_total = int(re.search(r"(\d+)", line).group(1)) // 1024  # Convert to MB
+                        elif line.startswith("MemAvailable:"):
+                            mem_available = int(re.search(r"(\d+)", line).group(1)) // 1024
+                            mem_used = mem_total - mem_available
+                            break
+
+                    if mem_total > 0:
+                        self.ram_ready.emit(mem_used, mem_total)
+                except Exception:
+                    pass
+
+                # ── Battery Status ────────────────────────────────────────
+                try:
+                    battery_info = _shell(s, "dumpsys battery", timeout=5)
+                    level = 0
+                    charging = False
+
+                    for line in battery_info.splitlines():
+                        line = line.strip()
+                        if line.startswith("level:"):
+                            try:
+                                level = int(line.split(":")[1].strip())
+                            except ValueError:
+                                pass
+                        elif line.startswith("status:"):
+                            status_str = line.split(":")[1].strip()
+                            # 2 = charging, 5 = full but still charging
+                            charging = status_str in ("2", "5")
+
+                    self.battery_ready.emit(level, charging)
+                except Exception:
+                    pass
+
+                # Wait before next measurement
+                time.sleep(1)
+
+            except Exception:
+                # If there's an error, wait a bit before retrying
+                time.sleep(2)
+
+    def stop(self):
+        self._running = False
+        self.wait()
+
 # ── DeviceInfoWidget ─────────────────────────────────────────────────────
 class DeviceInfoWidget(QWidget):
     """Tab page — shows live device info for the selected device."""
@@ -490,17 +593,43 @@ class DeviceInfoWidget(QWidget):
         self._serial: str = ""
         self._worker: _FetchWorker | None = None
         self._change_workers: list[QThread] = []
+        self._metrics_worker = None
+        self._auto_timer = QTimer()
+        self._auto_timer.timeout.connect(self._refresh_metrics)
         self._build_ui()
+
+    def __del__(self):
+        """Cleanup when widget is destroyed."""
+        if self._metrics_worker and self._metrics_worker.isRunning():
+            self._metrics_worker.stop()
 
     # ── public API ───────────────────────────────────────────────────────
     def set_device(self, serial: str):
         """Called when user selects a row in the table."""
+        # Stop existing metrics worker when changing devices
+        if self._metrics_worker and self._metrics_worker.isRunning():
+            self._metrics_worker.stop()
+
         self._serial = serial
         label = f"Serial: {serial}" if serial else "No device selected"
         self._serial_label.setText(label)
         enabled = bool(serial)
         self._change_device_btn.setEnabled(enabled)
         self._change_sim_btn.setEnabled(enabled)
+        # Auto-load diagnostics charts immediately
+        if serial:
+            self._diag_run_free()
+            self._diag_run_top()
+            self._diag_run_df()
+            # Auto-start live metrics refresh
+            if not self._metrics_auto_btn.isChecked():
+                self._metrics_auto_btn.setChecked(True)
+            else:
+                self._refresh_metrics()
+        else:
+            if self._metrics_auto_btn.isChecked():
+                self._metrics_auto_btn.setChecked(False)
+
     def load_device(self, serial: str):
         if not serial:
             self._clear_fields()
@@ -593,6 +722,7 @@ class DeviceInfoWidget(QWidget):
         self._f_cpu_abi      = _field()
         self._f_resolution   = _field()
         self._f_ram          = _field()
+        self._f_uptime       = _field()
 
         f1.addRow(_lbl("🏷 Brand"),        self._f_brand)
         f1.addRow(_lbl("📋 Model"),        self._f_model)
@@ -603,6 +733,7 @@ class DeviceInfoWidget(QWidget):
         f1.addRow(_lbl("💻 CPU ABI"),      self._f_cpu_abi)
         f1.addRow(_lbl("🖥 Resolution"),   self._f_resolution)
         f1.addRow(_lbl("🧠 RAM"),          self._f_ram)
+        f1.addRow(_lbl("⏱ Uptime"),        self._f_uptime)
         # ── Group 2: SIM / Telephony ─────────────────────────────────────
         g2, f2 = _group("📡 SIM / Telephony")
         self._f_imei    = _field()
@@ -766,6 +897,172 @@ class DeviceInfoWidget(QWidget):
 
         inner_vl.addLayout(act_btn_row)
 
+        # ── System Diagnostics ────────────────────────────────────────────
+        from features.activities import (
+            _DonutRow, _SparklineChart, _BatteryBar, _MetricsWorker,
+            parse_free, parse_top_cpu, parse_df,
+            _btn_primary, _btn_success,
+        )
+
+        # ── Live Device Metrics ───────────────────────────────────────────
+        metrics_group = QGroupBox("📈 Live Device Metrics")
+        metrics_group.setStyleSheet(_GROUP_SS)
+        mg_vl = QVBoxLayout()
+        mg_vl.setContentsMargins(10, 10, 10, 10)
+        mg_vl.setSpacing(8)
+
+        charts_row = QHBoxLayout()
+        charts_row.setSpacing(10)
+        self._cpu_chart = _SparklineChart("CPU Usage", "%",  max_val=100,  color=QColor("#1976d2"))
+        self._ram_chart = _SparklineChart("RAM Used",  "MB", max_val=4096, color=QColor("#388e3c"))
+        charts_row.addWidget(self._cpu_chart)
+        charts_row.addWidget(self._ram_chart)
+        mg_vl.addLayout(charts_row)
+
+        # Battery + controls row
+        bat_row = QHBoxLayout()
+        bat_row.setSpacing(10)
+        bat_lbl = QLabel("Battery:")
+        bat_lbl.setStyleSheet(_LABEL_SS)
+        bat_row.addWidget(bat_lbl)
+        self._metrics_battery_bar = _BatteryBar()
+        bat_row.addWidget(self._metrics_battery_bar)
+        self._metrics_bat_detail_lbl = QLabel("–")
+        self._metrics_bat_detail_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        bat_row.addWidget(self._metrics_bat_detail_lbl)
+        bat_row.addStretch()
+
+        interval_lbl = QLabel("Auto-refresh every:")
+        interval_lbl.setStyleSheet(_LABEL_SS)
+        bat_row.addWidget(interval_lbl)
+        self._metrics_interval_spin = QSpinBox()
+        self._metrics_interval_spin.setRange(2, 120)
+        self._metrics_interval_spin.setValue(5)
+        self._metrics_interval_spin.setSuffix(" s")
+        self._metrics_interval_spin.setFixedWidth(72)
+        self._metrics_interval_spin.setStyleSheet(
+            "QSpinBox { border: 1px solid #dce3f0; border-radius: 4px;"
+            " padding: 2px 6px; background: #ffffff; color: #212121; font-size: 11px; min-height: 20px; }"
+            "QSpinBox:focus { border: 1px solid #1976d2; }"
+            "QSpinBox::up-button, QSpinBox::down-button { width: 16px; border: none; background: transparent; }"
+        )
+        bat_row.addWidget(self._metrics_interval_spin)
+
+        self._metrics_auto_btn = QPushButton("▶ Start Auto-Refresh")
+        self._metrics_auto_btn.setCheckable(True)
+        self._metrics_auto_btn.setStyleSheet(
+            "QPushButton { background-color: #388e3c; color: white; font-weight: bold;"
+            " padding: 5px 12px; border-radius: 4px; font-size: 11px; border: none; }"
+            "QPushButton:hover { background-color: #2e7d32; }"
+        )
+        self._metrics_auto_btn.toggled.connect(self._toggle_metrics_auto_refresh)
+        bat_row.addWidget(self._metrics_auto_btn)
+
+        metrics_refresh_btn = QPushButton("↻ Refresh Now")
+        metrics_refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #1976d2; color: white; font-weight: bold;"
+            " padding: 5px 12px; border-radius: 4px; font-size: 11px; border: none; }"
+            "QPushButton:hover { background-color: #1565c0; }"
+            "QPushButton:disabled { background-color: #90caf9; }"
+        )
+        metrics_refresh_btn.clicked.connect(self._refresh_metrics)
+        bat_row.addWidget(metrics_refresh_btn)
+
+        mg_vl.addLayout(bat_row)
+        metrics_group.setLayout(mg_vl)
+        inner_vl.addWidget(metrics_group)
+
+        # ── System Diagnostics ────────────────────────────────────────────
+        diag_group = QGroupBox("💻 System Diagnostics")
+        diag_group.setStyleSheet(_GROUP_SS)
+        diag_vl = QVBoxLayout()
+        diag_vl.setContentsMargins(10, 10, 10, 10)
+        diag_vl.setSpacing(8)
+
+        # — Buttons row: Refresh only —
+        diag_btn_grid = QGridLayout()
+        diag_btn_grid.setSpacing(6)
+
+        b_refresh = _btn_primary("🔄 Refresh Charts")
+
+        b_refresh.clicked.connect(self._diag_refresh_all)
+
+        diag_btn_grid.addWidget(b_refresh, 0, 0)
+        diag_vl.addLayout(diag_btn_grid)
+
+        # — 2-column layout: left = CPU + Memory, right = Storage Partitions —
+        diag_cols = QHBoxLayout()
+        diag_cols.setSpacing(12)
+
+        # Left column: CPU Breakdown (top) + Memory (bottom)
+        left_diag_col = QVBoxLayout()
+        left_diag_col.setSpacing(8)
+
+        _cpu_lbl = QLabel("⚡ CPU Breakdown")
+        _cpu_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
+        left_diag_col.addWidget(_cpu_lbl)
+        self._diag_cpu_donuts = _DonutRow([
+            ("user", "User",   QColor("#1976d2")),
+            ("sys",  "System", QColor("#d32f2f")),
+            ("idle", "Idle",   QColor("#388e3c")),
+        ], size=100)
+        left_diag_col.addWidget(self._diag_cpu_donuts)
+
+        _ram_lbl = QLabel("🧠 Memory")
+        _ram_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
+        left_diag_col.addWidget(_ram_lbl)
+        self._diag_ram_donuts = _DonutRow([
+            ("mem",  "RAM",  QColor("#388e3c")),
+            ("swap", "Swap", QColor("#7b1fa2")),
+        ], size=100)
+        left_diag_col.addWidget(self._diag_ram_donuts)
+        left_diag_col.addStretch()
+
+        left_diag_w = QWidget()
+        left_diag_w.setLayout(left_diag_col)
+        diag_cols.addWidget(left_diag_w, 1)
+
+        # Right column: Storage Partitions (top 2 + bottom 2)
+        right_diag_col = QVBoxLayout()
+        right_diag_col.setSpacing(4)
+
+        _stor_lbl = QLabel("💾 Storage Partitions")
+        _stor_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
+        right_diag_col.addWidget(_stor_lbl)
+
+        _STOR_COLORS = [QColor("#00796b"), QColor("#f57c00"), QColor("#546e7a"), QColor("#7b1fa2")]
+        _STOR_KEYS   = ["s0", "s1", "s2", "s3"]
+
+        # Top row: s0, s1
+        self._diag_storage_row0 = _DonutRow(
+            [(k, "–", c) for k, c in zip(_STOR_KEYS[:2], _STOR_COLORS[:2])],
+            size=100,
+        )
+        right_diag_col.addWidget(self._diag_storage_row0)
+
+        # Bottom row: s2, s3
+        self._diag_storage_row1 = _DonutRow(
+            [(k, "–", c) for k, c in zip(_STOR_KEYS[2:], _STOR_COLORS[2:])],
+            size=100,
+        )
+        right_diag_col.addWidget(self._diag_storage_row1)
+        right_diag_col.addStretch()
+
+        right_diag_w = QWidget()
+        right_diag_w.setLayout(right_diag_col)
+        diag_cols.addWidget(right_diag_w, 1)
+
+        diag_vl.addLayout(diag_cols)
+        diag_group.setLayout(diag_vl)
+        inner_vl.addWidget(diag_group)
+
+        # Keep references for use in methods
+        self._DonutRow = _DonutRow
+        self._MetricsWorker = _MetricsWorker
+        self._parse_free = parse_free
+        self._parse_top_cpu = parse_top_cpu
+        self._parse_df = parse_df
+
         inner_vl.addStretch()
 
         scroll.setWidget(inner)
@@ -776,6 +1073,7 @@ class DeviceInfoWidget(QWidget):
             self._f_brand, self._f_model, self._f_manufacturer,
             self._f_android, self._f_sdk, self._f_serial_no,
             self._f_cpu_abi, self._f_resolution, self._f_ram,
+            self._f_uptime,
             self._f_imei, self._f_simcode, self._f_iccid,
             self._f_subid, self._f_phone,
             self._f_lat, self._f_lon, self._f_wifi,
@@ -815,6 +1113,7 @@ class DeviceInfoWidget(QWidget):
             (self._f_cpu_abi,      "cpu_abi"),
             (self._f_resolution,   "resolution"),
             (self._f_ram,          "ram"),
+            (self._f_uptime,       "uptime"),
             (self._f_imei,         "imei"),
             (self._f_simcode,      "sim_code"),
             (self._f_iccid,        "iccid"),
@@ -879,3 +1178,154 @@ class DeviceInfoWidget(QWidget):
         w.finished.connect(lambda: self._change_workers.remove(w) if w in self._change_workers else None)
         self._change_workers.append(w)
         w.start()
+
+    # ── System Diagnostics helpers ────────────────────────────────────────
+
+    def _diag_refresh_all(self):
+        """Refresh all three diagnostic charts at once."""
+        self._diag_run_free()
+        self._diag_run_top()
+        self._diag_run_df()
+
+    def _diag_run_free(self):
+        if not self._serial:
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["adb", "-s", self._serial, "shell", "free", "-m"],
+                startupinfo=_si, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            output = r.stdout or r.stderr or "(no output)"
+            mem_used, mem_total, swap_used, swap_total = self._parse_free(output)
+            if mem_total > 0:
+                self._diag_ram_donuts.update_chart(
+                    "mem", mem_used, mem_total, f"{mem_used}/{mem_total} MB"
+                )
+            if swap_total > 0:
+                self._diag_ram_donuts.update_chart(
+                    "swap", swap_used, swap_total, f"{swap_used}/{swap_total} MB"
+                )
+        except Exception:
+            pass
+
+    def _diag_run_top(self):
+        if not self._serial:
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["adb", "-s", self._serial, "shell", "top", "-n", "1"],
+                startupinfo=_si, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            output = r.stdout or r.stderr or "(no output)"
+            user, sys_, idle = self._parse_top_cpu(output)
+            total = user + sys_ + idle
+            if total > 0:
+                self._diag_cpu_donuts.update_chart("user", user,  100.0, f"{user:.1f}%")
+                self._diag_cpu_donuts.update_chart("sys",  sys_,  100.0, f"{sys_:.1f}%")
+                self._diag_cpu_donuts.update_chart("idle", idle,  100.0, f"{idle:.1f}%")
+        except Exception:
+            pass
+
+    def _diag_run_df(self):
+        if not self._serial:
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["adb", "-s", self._serial, "shell", "df", "-h"],
+                startupinfo=_si, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            output = r.stdout or r.stderr or "(no output)"
+            partitions = self._parse_df(output)
+            PRIORITY = ["/data", "/", "/vendor", "/cache", "/efs"]
+            partitions.sort(key=lambda x: PRIORITY.index(x[0]) if x[0] in PRIORITY else 99)
+            # Row 0: s0, s1
+            for i, key in enumerate(["s0", "s1"]):
+                if i < len(partitions):
+                    mount, used, total = partitions[i]
+                    label = f"{used/1024:.1f}G/{total/1024:.1f}G"
+                    chart = self._diag_storage_row0._charts.get(key)
+                    if chart:
+                        chart.title = mount
+                        chart.set_data(used, total, label)
+                    self._diag_storage_row0.update_chart(key, used, total, label)
+                else:
+                    chart = self._diag_storage_row0._charts.get(key)
+                    if chart:
+                        chart.setVisible(False)
+            # Row 1: s2, s3
+            for i, key in enumerate(["s2", "s3"]):
+                pidx = i + 2
+                if pidx < len(partitions):
+                    mount, used, total = partitions[pidx]
+                    label = f"{used/1024:.1f}G/{total/1024:.1f}G"
+                    chart = self._diag_storage_row1._charts.get(key)
+                    if chart:
+                        chart.title = mount
+                        chart.set_data(used, total, label)
+                    self._diag_storage_row1.update_chart(key, used, total, label)
+                else:
+                    chart = self._diag_storage_row1._charts.get(key)
+                    if chart:
+                        chart.setVisible(False)
+        except Exception:
+            pass
+
+    # ── Live Device Metrics helpers ───────────────────────────────────────
+
+    def _refresh_metrics(self):
+        if not self._serial:
+            return
+        # Stop existing worker if running
+        if self._metrics_worker and self._metrics_worker.isRunning():
+            self._metrics_worker.stop()
+        # Start new worker
+        w = self._MetricsWorker(self._serial)
+        w.cpu_ready.connect(self._on_metrics_cpu)
+        w.ram_ready.connect(self._on_metrics_ram)
+        w.battery_ready.connect(self._on_metrics_battery)
+        self._metrics_worker = w
+        w.start()
+
+    def _on_metrics_cpu(self, pct: float):
+        self._cpu_chart.push(pct)
+
+    def _on_metrics_ram(self, used: int, total: int):
+        if total > 0:
+            self._ram_chart.max_val = float(total)
+        self._ram_chart.push(float(used))
+
+    def _on_metrics_battery(self, level: int, charging: bool):
+        self._metrics_battery_bar.set_state(level, charging)
+        status = "Charging ⚡" if charging else "Discharging"
+        self._metrics_bat_detail_lbl.setText(f"{level}%  —  {status}")
+
+    def _toggle_metrics_auto_refresh(self, checked: bool):
+        if checked:
+            self._auto_timer.start(self._metrics_interval_spin.value() * 1000)
+            self._metrics_auto_btn.setText("⏹ Stop Auto-Refresh")
+            self._metrics_auto_btn.setStyleSheet(
+                "QPushButton { background-color: #d32f2f; color: white; font-weight: bold;"
+                " padding: 5px 12px; border-radius: 4px; font-size: 11px; border: none; }"
+                "QPushButton:hover { background-color: #b71c1c; }"
+            )
+            self._refresh_metrics()
+        else:
+            self._auto_timer.stop()
+            # Stop the metrics worker when disabling auto-refresh
+            if self._metrics_worker and self._metrics_worker.isRunning():
+                self._metrics_worker.stop()
+            self._metrics_auto_btn.setText("▶ Start Auto-Refresh")
+            self._metrics_auto_btn.setStyleSheet(
+                "QPushButton { background-color: #388e3c; color: white; font-weight: bold;"
+                " padding: 5px 12px; border-radius: 4px; font-size: 11px; border: none; }"
+                "QPushButton:hover { background-color: #2e7d32; }"
+            )
+
+
+

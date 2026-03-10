@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 import subprocess
 import re
+import zipfile
+import tempfile
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
@@ -135,7 +137,6 @@ class _ListAppsWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-
 class _AppActionWorker(QThread):
     progress = Signal(str)
     finished = Signal(str)
@@ -152,17 +153,52 @@ class _AppActionWorker(QThread):
     def run(self):
         results = []
         if self.action == "install_apk":
-            self.progress.emit(f"📦 Installing {os.path.basename(self.apk_path)}…")
-            flags = ["-r"] if self.reinstall else []
-            r = subprocess.run(
-                ["adb", "-s", self.serial, "install"] + flags + [self.apk_path],
-                startupinfo=_si, capture_output=True, text=True, timeout=120,
-            )
-            out = (r.stdout + r.stderr).strip()
-            if "Success" in out:
-                results.append(f"✅ Installed {os.path.basename(self.apk_path)}")
+            apk = self.apk_path
+            ext = os.path.splitext(apk)[1].lower()
+            self.progress.emit(f"📦 Installing {os.path.basename(apk)}…")
+
+            if ext == ".xapk":
+                # XAPK is a ZIP containing split APKs
+                tmp_dir = tempfile.mkdtemp(prefix="xapk_")
+                try:
+                    with zipfile.ZipFile(apk, "r") as z:
+                        apk_files = [n for n in z.namelist() if n.endswith(".apk")]
+                        if not apk_files:
+                            results.append(f"❌ No APK files found inside XAPK archive")
+                        else:
+                            z.extractall(tmp_dir, members=apk_files)
+                            extracted = [os.path.join(tmp_dir, n) for n in apk_files]
+                            flags = ["-r"] if self.reinstall else []
+                            r = subprocess.run(
+                                ["adb", "-s", self.serial, "install-multiple"] + flags + extracted,
+                                startupinfo=_si, capture_output=True, text=True, timeout=180,
+                            )
+                            out = (r.stdout + r.stderr).strip()
+                            if "Success" in out:
+                                results.append(f"✅ Installed (XAPK) {os.path.basename(apk)}")
+                            else:
+                                results.append(f"❌ Install failed: {out[:200]}")
+                except zipfile.BadZipFile:
+                    results.append(f"❌ Invalid XAPK file (not a valid ZIP archive)")
+                except Exception as e:
+                    results.append(f"❌ XAPK install error: {e}")
+                finally:
+                    import shutil as _shutil
+                    try:
+                        _shutil.rmtree(tmp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
             else:
-                results.append(f"❌ Install failed: {out[:200]}")
+                flags = ["-r"] if self.reinstall else []
+                r = subprocess.run(
+                    ["adb", "-s", self.serial, "install"] + flags + [apk],
+                    startupinfo=_si, capture_output=True, text=True, timeout=120,
+                )
+                out = (r.stdout + r.stderr).strip()
+                if "Success" in out:
+                    results.append(f"✅ Installed {os.path.basename(apk)}")
+                else:
+                    results.append(f"❌ Install failed: {out[:200]}")
         else:
             for pkg in self.packages:
                 try:
@@ -267,6 +303,7 @@ class _AppActionWorker(QThread):
 class PackageWidget(QWidget):
     """Tab page — manage applications on the selected device."""
     status_update = Signal(str)
+    install_chrome_requested = Signal()   # emit to trigger Chrome install on all devices
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -438,7 +475,7 @@ class PackageWidget(QWidget):
         act_row2.addWidget(lbl_apk)
 
         self._apk_path_input = QLineEdit()
-        self._apk_path_input.setPlaceholderText("Select .apk or .apks file…")
+        self._apk_path_input.setPlaceholderText("Select .apk, .apks or .xapk file…")
         self._apk_path_input.setStyleSheet(_INPUT_SS)
         self._apk_path_input.setReadOnly(True)
         act_row2.addWidget(self._apk_path_input, 1)

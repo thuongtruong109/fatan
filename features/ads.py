@@ -33,11 +33,14 @@ def run_ads_automation(
         print(f"⏳ Waiting for ads page to load on {serial}...")
         time.sleep(5)
 
-        # ── Bước 2: Đợi modal "Link to ad" xuất hiện ────────────────────
+        # ── Bước 2: Đợi modal "Link to ad" xuất hiện (không giới hạn thời gian) ──
         print(f"⏳ Waiting for 'Link to ad' modal on {serial}...")
         modal_appeared = False
-        for _ in range(15):  # Đợi tối đa 15 giây
-            time.sleep(1)
+        elapsed = 0
+        poll_interval = 2  # kiểm tra mỗi 2 giây
+        while True:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
             check_modal = cdp.execute_js("""
             (function() {
                 const dialogs = document.querySelectorAll('[role="dialog"]');
@@ -51,8 +54,9 @@ def run_ads_automation(
             """)
             if check_modal:
                 modal_appeared = True
-                print(f"✅ 'Link to ad' modal appeared on {serial}")
+                print(f"✅ 'Link to ad' modal appeared on {serial} (after {elapsed}s)")
                 break
+            print(f"⏳ [{elapsed}s] Still waiting for 'Link to ad' modal on {serial}...")
 
         if not modal_appeared:
             print(f"⚠️  'Link to ad' modal not found on {serial}, collecting current page info...")

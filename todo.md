@@ -364,3 +364,27 @@ Values:
 adb exec-out screencap -p > screenshot.png
 
 👉 screenshot thẳng về PC.
+
+adb reboot edl (chế độ Qualcomm cực thấp)
+
+adb reboot download (Samsung Odin mode)
+
+adb reboot fastboot (fastbootd trên Android mới)
+
+Debug sâu (cho dev / pentest / mod)
+
+ADB còn có thể:
+
+dump dữ liệu hệ thống
+
+đọc database app (nếu có quyền)
+
+test permission
+
+inject input
+
+automation test
+
+reverse engineering
+
+Ví dụ:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import os
+import time
 from typing import List
 
 from PySide6.QtWidgets import (
@@ -334,14 +335,25 @@ class ProxyWidget(QWidget):
         for serial in serials:
             try:
                 if ptype == 1:
-                    # HTTP proxy — use Android global_http_proxy setting
+                    # ── HTTP / HTTPS proxy ──────────────────────────────────────────
+                    # Android chỉ hỗ trợ format "host:port" cho http_proxy.
+                    # KHÔNG được nhúng user:pass vào đây — Android không hiểu và sẽ
+                    # parse sai toàn bộ setting → mất kết nối.
                     proxy_val = f"{host}:{port_int}"
                     user = self._user_input.text().strip()
                     passwd = self._pass_input.text().strip()
-                    if user:
-                        proxy_val = f"{user}:{passwd}@{host}:{port_int}" if passwd else f"{user}@{host}:{port_int}"
+
+                    # Xóa sạch HTTP proxy cũ trước (dùng delete, không dùng ":0")
+                    _adb(serial, "shell", "settings", "delete", "global", "http_proxy")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_host")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_port")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_exclusion_list")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_username")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_password")
+
+                    # Set proxy mới — chỉ host:port (Android hiểu được)
                     _adb(serial, "shell", "settings", "put", "global", "http_proxy", proxy_val)
-                    # Also set via global settings for Android 8+
+                    # Các key global_http_proxy_* cho Android 8+ (PAC / manual)
                     _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_host", host)
                     _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_port", str(port_int))
                     if user:
@@ -350,10 +362,30 @@ class ProxyWidget(QWidget):
                             _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_password", passwd)
 
                 elif ptype == 2:
-                    # SOCKS5 — set via Android system properties
-                    _adb(serial, "shell", "settings", "put", "global", "http_proxy", "")
-                    _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_host", "")
-                    _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_port", "0")
+                    # ── SOCKS5 proxy ────────────────────────────────────────────────
+                    # Android KHÔNG có SOCKS5 system-wide proxy native.
+                    # Giải pháp: dùng ADB port-forward để đưa SOCKS5 về localhost,
+                    # sau đó KHÔNG set http_proxy (vì Android chỉ hiểu HTTP proxy).
+                    # Chỉ forward port, để app tự cấu hình SOCKS5 nếu hỗ trợ.
+                    #
+                    # Nếu muốn toàn hệ thống: cần redsocks/tun2socks trên device
+                    # (yêu cầu root). Ở đây chỉ làm ADB forward port để dùng được
+                    # từ app có hỗ trợ SOCKS5 explicit.
+
+                    # Xóa HTTP proxy cũ (tránh conflict)
+                    _adb(serial, "shell", "settings", "delete", "global", "http_proxy")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_host")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_port")
+                    _adb(serial, "shell", "settings", "delete", "global", "global_http_proxy_exclusion_list")
+
+                    # Forward port SOCKS5 từ PC về localhost trên device
+                    subprocess.run(
+                        ["adb", "-s", serial, "forward", f"tcp:{port_int}", f"tcp:{port_int}"],
+                        startupinfo=_si,
+                        capture_output=True,
+                        text=True,
+                    )
+                    # Lưu thông tin để hiển thị status
                     _adb(serial, "shell", "setprop", "net.socks5.host", host)
                     _adb(serial, "shell", "setprop", "net.socks5.port", str(port_int))
 
@@ -361,7 +393,7 @@ class ProxyWidget(QWidget):
             except Exception as e:
                 self._set_status(f"❌ {serial}: {e}", ok=False)
 
-        type_label = "HTTP" if ptype == 1 else "SOCKS5"
+        type_label = "HTTP / HTTPS" if ptype == 1 else "SOCKS5"
         self._set_status(f"✅ {type_label} proxy applied to {ok_count}/{len(serials)} device(s).")
         self.refresh_device_status()
 
@@ -374,15 +406,23 @@ class ProxyWidget(QWidget):
         ok_count = 0
         for serial in serials:
             try:
-                # Clear HTTP proxy
+                # Xóa đúng cách bằng cách set thành empty string thay vì delete
+                # (delete có thể không hoạt động ngay lập tức trên một số Android version)
                 _adb(serial, "shell", "settings", "put", "global", "http_proxy", ":0")
                 _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_host", "")
                 _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_port", "0")
+                _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_exclusion_list", "")
                 _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_username", "")
                 _adb(serial, "shell", "settings", "put", "global", "global_http_proxy_password", "")
-                # Clear SOCKS5 props
+                # Xóa SOCKS5 props + hủy port forward
                 _adb(serial, "shell", "setprop", "net.socks5.host", "")
-                _adb(serial, "shell", "setprop", "net.socks5.port", "0")
+                _adb(serial, "shell", "setprop", "net.socks5.port", "")
+                subprocess.run(
+                    ["adb", "-s", serial, "forward", "--remove-all"],
+                    startupinfo=_si,
+                    capture_output=True,
+                    text=True,
+                )
                 ok_count += 1
             except Exception as e:
                 self._set_status(f"❌ {serial}: {e}", ok=False)
@@ -401,11 +441,12 @@ class ProxyWidget(QWidget):
             proxy_port = self._read_prop(serial, "global_http_proxy_port")
             socks_host = self._read_setprop(serial, "net.socks5.host")
 
-            if socks_host:
+            # HTTP proxy takes priority: if global_http_proxy_host is set, it's HTTP
+            if proxy_host and proxy_host not in ("", "null"):
+                proxy_data[serial] = {"type": "HTTP / HTTPS", "host_port": f"{proxy_host}:{proxy_port}"}
+            elif socks_host:
                 socks_port = self._read_setprop(serial, "net.socks5.port")
                 proxy_data[serial] = {"type": "SOCKS5", "host_port": f"{socks_host}:{socks_port}"}
-            elif proxy_host and proxy_host not in ("", "null"):
-                proxy_data[serial] = {"type": "HTTP", "host_port": f"{proxy_host}:{proxy_port}"}
             else:
                 proxy_data[serial] = {"type": "None", "host_port": "—"}
 
@@ -415,7 +456,8 @@ class ProxyWidget(QWidget):
         try:
             r = _adb(serial, "shell", "settings", "get", "global", key)
             val = r.stdout.strip()
-            return "" if val in ("null", "0", "") else val
+            # Android có thể trả về "null" hoặc empty string khi setting không tồn tại
+            return "" if val in ("null", "Null", "NULL", "", "0") or not val else val
         except Exception:
             return ""
 

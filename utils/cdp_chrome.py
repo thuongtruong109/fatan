@@ -18,6 +18,7 @@ import subprocess
 import requests
 import websocket
 from typing import Optional, Dict, Any
+from utils.adb import adb as _adb_cmd, si as _si
 
 
 class ChromeCDP:
@@ -50,12 +51,9 @@ class ChromeCDP:
             except:
                 pass
 
-    def _adb(self, cmd: str) -> str:
+    def _adb(self, *args) -> str:
         """Chạy ADB command."""
-        result = subprocess.run(
-            f"adb -s {self.serial} {cmd}",
-            shell=True, capture_output=True, text=True
-        )
+        result = _adb_cmd(self.serial, *args, check=False)
         if result.returncode != 0:
             raise RuntimeError(f"ADB failed: {result.stderr}")
         return result.stdout.strip()
@@ -63,27 +61,27 @@ class ChromeCDP:
     def _setup_chrome_debugging(self):
         """Setup Chrome remote debugging."""
         # Kill Chrome hiện tại
-        self._adb("shell am force-stop com.android.chrome")
+        self._adb("shell", "am", "force-stop", "com.android.chrome")
         time.sleep(2)
 
         # Ghi flag --remote-allow-origins vào command_line để Chrome chấp nhận WebSocket CDP
         # (Chrome 111+ từ chối kết nối nếu thiếu flag này → lỗi 403 Forbidden)
         self._adb(
-            "shell 'echo \"chrome --remote-allow-origins=*\" "
-            "> /data/local/tmp/chrome-command-line'"
+            "shell", "sh", "-c",
+            "echo 'chrome --remote-allow-origins=*' > /data/local/tmp/chrome-command-line"
         )
 
         # Mở Chrome, vào thẳng URL nếu có để tránh vào 2 lần
         if self._initial_url:
-            self._adb(f'shell am start -a android.intent.action.VIEW -n com.android.chrome/com.google.android.apps.chrome.Main -d "{self._initial_url}"')
+            self._adb("shell", "am", "start", "-a", "android.intent.action.VIEW",
+                      "-n", "com.android.chrome/com.google.android.apps.chrome.Main",
+                      "-d", self._initial_url)
         else:
-            self._adb("shell am start -n com.android.chrome/com.google.android.apps.chrome.Main")
+            self._adb("shell", "am", "start", "-n", "com.android.chrome/com.google.android.apps.chrome.Main")
 
         # Forward port
-        subprocess.run(
-            f"adb -s {self.serial} forward tcp:{self.debug_port} localabstract:chrome_devtools_remote",
-            shell=True, check=True
-        )
+        _adb_cmd(self.serial,
+                 "forward", f"tcp:{self.debug_port}", "localabstract:chrome_devtools_remote")
 
         # Đợi Chrome khởi động, retry nhiều lần
         for attempt in range(10):

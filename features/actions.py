@@ -76,6 +76,40 @@ _BTN_SECONDARY_SS = (
 _LABEL_SS  = "color: #555; font-size: 11px; font-weight: bold;"
 _CB_SS     = "QCheckBox { font-size: 11px; color: #333; }"
 
+_SPINBOX_SS = (
+    "QSpinBox {"
+    "  border: 1px solid #dce3f0; border-radius: 4px;"
+    "  padding: 2px 6px; background: #ffffff; color: #212121;"
+    "  font-size: 11px; min-height: 18px;"
+    "}"
+    "QSpinBox:focus { border: 1px solid #1976d2; }"
+    "QSpinBox::up-button, QSpinBox::down-button {"
+    "  width: 16px; border: none; background: transparent;"
+    "}"
+    "QSpinBox::up-arrow { image: none; border-left: 4px solid transparent;"
+    "  border-right: 4px solid transparent; border-bottom: 5px solid #888;"
+    "  width: 0; height: 0; margin: 2px; }"
+    "QSpinBox::down-arrow { image: none; border-left: 4px solid transparent;"
+    "  border-right: 4px solid transparent; border-top: 5px solid #888;"
+    "  width: 0; height: 0; margin: 2px; }"
+)
+
+_COMBO_SS = (
+    "QComboBox {"
+    "  border: 1px solid #dce3f0; border-radius: 4px;"
+    "  padding: 2px 6px; background: #ffffff; color: #212121;"
+    "  font-size: 11px; min-height: 22px;"
+    "}"
+    "QComboBox:focus { border: 1px solid #1976d2; }"
+    "QComboBox::drop-down { border: none; width: 20px; }"
+    "QComboBox::down-arrow {"
+    "  border-left: 4px solid transparent;"
+    "  border-right: 4px solid transparent;"
+    "  border-top: 5px solid #888;"
+    "  width: 0; height: 0;"
+    "}"
+)
+
 class _OpenUrlWorker(QThread):
     finished = Signal()
 
@@ -183,26 +217,43 @@ class _HuntCoordWorker(QThread):
 
     def run(self):
         try:
+            # Use getevent without -l so we get raw numeric type/code/value.
+            # Format per line: /dev/input/eventN: TTTT CCCC VVVVVVVV
+            #   EV_ABS (0003) + ABS_MT_POSITION_X (0035) → X coordinate
+            #   EV_ABS (0003) + ABS_MT_POSITION_Y (0036) → Y coordinate
+            # getevent is a passive listener — it does NOT send any tap to the device.
             self._proc = subprocess.Popen(
-                ["adb", "-s", self.serial, "shell", "getevent", "-lt"],
+                ["adb", "-s", self.serial, "shell", "getevent"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 startupinfo=_si, text=True, bufsize=1,
             )
             x = y = None
             for line in self._proc.stdout:
-                if "ABS_MT_POSITION_X" in line:
-                    try:
-                        x = int(line.strip().split()[-1], 16)
-                    except Exception:
-                        pass
-                elif "ABS_MT_POSITION_Y" in line:
-                    try:
-                        y = int(line.strip().split()[-1], 16)
-                    except Exception:
-                        pass
+                # Typical line: "/dev/input/event1: 0003 0035 0000017a"
+                parts = line.strip().split()
+                # Need at least 3 tokens: [device:] type code value
+                # Lines with device prefix have 4 tokens; raw have 3.
+                if len(parts) >= 3:
+                    # Strip trailing colon from device name if present
+                    if parts[0].endswith(":"):
+                        parts = parts[1:]
+                    if len(parts) >= 3:
+                        ev_type = parts[0].lstrip("0") or "0"
+                        ev_code = parts[1].lstrip("0") or "0"
+                        ev_val  = parts[2]
+                        try:
+                            val = int(ev_val, 16)
+                        except ValueError:
+                            continue
+                        # EV_ABS = 3, ABS_MT_POSITION_X = 53 (0x35), ABS_MT_POSITION_Y = 54 (0x36)
+                        if ev_type in ("3", "03", "003", "0003"):
+                            if ev_code in ("35", "035", "0035"):   # ABS_MT_POSITION_X
+                                x = val
+                            elif ev_code in ("36", "036", "0036"): # ABS_MT_POSITION_Y
+                                y = val
                 if x is not None and y is not None:
                     self.coord_found.emit(x, y)
-                    break  # capture only one tap
+                    break  # capture only the first complete touch
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -254,12 +305,14 @@ class _AutoClickWorker(QThread):
 
 class ActionsWidget(QWidget):
     status_update = Signal(str)
+    hunt_mode_active = Signal(bool)   # True when waiting for a tap coordinate
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._serial: str = ""
         self._workers: list[QThread] = []
         self._auto_click_worker: _AutoClickWorker | None = None
+        self._hunt_active: bool = False
         self._build_ui()
 
     def set_device(self, serial: str):
@@ -514,10 +567,6 @@ class ActionsWidget(QWidget):
         right_vl.addLayout(list_btn_row)
 
         # — Click settings row —
-        _sb_ss = ("QSpinBox { font-size: 11px; padding: 2px 4px;"
-                  " border: 1px solid #dce3f0; border-radius: 4px; }")
-        _cb_ss2 = ("QComboBox { font-size: 11px; padding: 2px 6px;"
-                   " border: 1px solid #dce3f0; border-radius: 4px; }")
         cfg_row = QHBoxLayout()
         cfg_row.setSpacing(10)
         lbl_cpc = QLabel("Clicks/coord:")
@@ -527,7 +576,7 @@ class ActionsWidget(QWidget):
         self._clicks_per_coord.setRange(1, 9999)
         self._clicks_per_coord.setValue(1)
         self._clicks_per_coord.setFixedWidth(70)
-        self._clicks_per_coord.setStyleSheet(_sb_ss)
+        self._clicks_per_coord.setStyleSheet(_SPINBOX_SS)
         self._clicks_per_coord.valueChanged.connect(self._update_completion_time)
         cfg_row.addWidget(self._clicks_per_coord)
         lbl_delay = QLabel("Delay (ms):")
@@ -538,7 +587,7 @@ class ActionsWidget(QWidget):
         self._click_delay_ms.setValue(500)
         self._click_delay_ms.setSingleStep(100)
         self._click_delay_ms.setFixedWidth(80)
-        self._click_delay_ms.setStyleSheet(_sb_ss)
+        self._click_delay_ms.setStyleSheet(_SPINBOX_SS)
         self._click_delay_ms.valueChanged.connect(self._update_completion_time)
         cfg_row.addWidget(self._click_delay_ms)
         cfg_row.addStretch()
@@ -558,14 +607,14 @@ class ActionsWidget(QWidget):
         time_row.addWidget(lbl_repeat)
         self._repeat_combo = QComboBox()
         self._repeat_combo.addItems(["1× (once)", "N times", "Infinite (∞)"])
-        self._repeat_combo.setStyleSheet(_cb_ss2)
+        self._repeat_combo.setStyleSheet(_COMBO_SS)
         self._repeat_combo.currentIndexChanged.connect(self._on_repeat_changed)
         time_row.addWidget(self._repeat_combo)
         self._repeat_n = QSpinBox()
         self._repeat_n.setRange(2, 9999)
         self._repeat_n.setValue(2)
         self._repeat_n.setFixedWidth(60)
-        self._repeat_n.setStyleSheet(_sb_ss)
+        self._repeat_n.setStyleSheet(_SPINBOX_SS)
         self._repeat_n.setVisible(False)
         self._repeat_n.valueChanged.connect(self._update_completion_time)
         time_row.addWidget(self._repeat_n)
@@ -657,23 +706,41 @@ class ActionsWidget(QWidget):
     def _start_hunt(self):
         if not self._serial:
             return
-        self._hunt_status_lbl.setText("⏳ Waiting for tap on device...")
+        self._hunt_status_lbl.setText("⏳ Waiting for tap on device or preview window…")
         self._hunt_btn.setEnabled(False)
+        self._hunt_active = True
+        self.hunt_mode_active.emit(True)
         w = _HuntCoordWorker(self._serial)
         w.coord_found.connect(self._on_hunt_coord)
         w.error.connect(lambda e: self.status_update.emit(f"❌ Hunt error: {e}"))
         w.finished.connect(lambda: self._hunt_btn.setEnabled(True))
-        w.finished.connect(
-            lambda: self._hunt_status_lbl.setText("Press Hunt then tap on device")
-        )
+        w.finished.connect(lambda: self._hunt_status_lbl.setText("Press Hunt then tap on device"))
+        w.finished.connect(lambda: self._set_hunt_inactive())
         w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(w)
         w.start()
+
+    def _set_hunt_inactive(self):
+        self._hunt_active = False
+        self.hunt_mode_active.emit(False)
+
+    def receive_preview_click(self, device_x: int, device_y: int):
+        """Called from gui.py when the user clicks the preview window during hunt mode."""
+        if not self._hunt_active:
+            return
+        # Stop any running hunt worker (getevent) since we got coords from the preview
+        for w in list(self._workers):
+            if isinstance(w, _HuntCoordWorker) and w.isRunning():
+                w.stop()
+                w.wait(500)
+        self._on_hunt_coord(device_x, device_y)
 
     def _on_hunt_coord(self, x: int, y: int):
         n = self._coord_list.count() + 1
         self._coord_list.addItem(f"#{n}: ({x}, {y})")
         self._hunt_status_lbl.setText(f"✅ Captured ({x}, {y})")
+        self._hunt_active = False
+        self.hunt_mode_active.emit(False)
         self._update_completion_time()
         self._start_click_btn.setEnabled(bool(self._serial))
 

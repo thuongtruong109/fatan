@@ -145,6 +145,7 @@ class SettingsWidget(QWidget):
     settings_saved = Signal(dict)        # emitted after user saves
     setup_keyboard_requested = Signal()  # emit to trigger keyboard setup on all devices
     install_chrome_requested = Signal()  # emit to trigger Chrome install on all devices
+    install_socksdroid_requested = Signal()  # emit to trigger SocksDroid install on all devices
 
     DEFAULTS = {
         "preview_width": 300,
@@ -254,37 +255,13 @@ class SettingsWidget(QWidget):
         ctrl_vl.setContentsMargins(12, 10, 12, 12)
         ctrl_vl.setSpacing(10)
 
-        lbl_w = QLabel("↔️ Width (px):")
-        lbl_w.setStyleSheet(_LABEL_SS)
-        lbl_w.setFixedWidth(80)
-        self._width_input = QLineEdit(str(self._data["preview_width"]))
-        self._width_input.setPlaceholderText("e.g. 400")
-        self._width_input.setMaximumWidth(80)
-        self._width_input.setStyleSheet(_INPUT_SS)
-        lbl_h = QLabel("↕️ Height (px):")
-        lbl_h.setStyleSheet(_LABEL_SS)
-        lbl_h.setFixedWidth(80)
-        self._height_input = QLineEdit(str(self._data["preview_height"]))
-        self._height_input.setPlaceholderText("e.g. 600")
-        self._height_input.setMaximumWidth(80)
-        self._height_input.setStyleSheet(_INPUT_SS)
-
         row_wh = QHBoxLayout()
         row_wh.setSpacing(8)
-        row_wh.addWidget(lbl_w)
-        row_wh.addWidget(self._width_input)
-        row_wh.addSpacing(16)
-        row_wh.addWidget(lbl_h)
-        row_wh.addWidget(self._height_input)
 
-        sep1 = QLabel("|")
-        sep1.setStyleSheet("color: #ccc; margin-left: 10px")
-        row_wh.addWidget(sep1)
-
-        # Row 1: Screen lock
+        # Row 1: Screen lock + Bluetooth (same row)
         lbl_lock = QLabel("🔒 Screen lock:")
         lbl_lock.setStyleSheet(_LABEL_SS)
-        lbl_lock.setFixedWidth(80)
+        lbl_lock.setFixedWidth(90)
         row_wh.addWidget(lbl_lock)
         self._lock_combo = QComboBox()
         self._lock_combo.addItems(["None (disabled)", "Swipe"])
@@ -297,6 +274,28 @@ class SettingsWidget(QWidget):
         self._lock_combo.setMaximumWidth(140)
         row_wh.addWidget(self._lock_combo)
         self._lock_combo.currentIndexChanged.connect(lambda _: self._apply_screen_lock())
+
+        sep_bt = QLabel("|")
+        sep_bt.setStyleSheet("color: #ccc; margin-left: 10px")
+        row_wh.addWidget(sep_bt)
+
+        lbl_stay = QLabel("� Stay on charging:")
+        lbl_stay.setStyleSheet(_LABEL_SS)
+        lbl_stay.setFixedWidth(120)
+        row_wh.addWidget(lbl_stay)
+        btn_stay_on = QPushButton("ON")
+        btn_stay_on.setStyleSheet(_BTN_ON_SS)
+        btn_stay_on.setFixedHeight(26)
+        btn_stay_on.setToolTip("adb shell settings put global stay_on_while_plugged_in 3")
+        btn_stay_on.clicked.connect(lambda: self._device_action("stay_on_charging_on"))
+        row_wh.addWidget(btn_stay_on)
+        btn_stay_off = QPushButton("OFF")
+        btn_stay_off.setStyleSheet(_BTN_OFF_SS)
+        btn_stay_off.setFixedHeight(26)
+        btn_stay_off.setToolTip("adb shell settings put global stay_on_while_plugged_in 0")
+        btn_stay_off.clicked.connect(lambda: self._device_action("stay_on_charging_off"))
+        row_wh.addWidget(btn_stay_off)
+
         row_wh.addStretch()
         ctrl_vl.addLayout(row_wh)
 
@@ -415,31 +414,8 @@ class SettingsWidget(QWidget):
         row_bright.addWidget(self._volume_slider)
         row_bright.addWidget(self._vol_val_lbl)
 
-        # Bluetooth toggle (same row, after volume)
-        sep_bt = QLabel("|")
-        sep_bt.setStyleSheet("color: #ccc;")
-        row_bright.addWidget(sep_bt)
-
-        lbl_bt = QLabel("🔵 Bluetooth:")
-        lbl_bt.setStyleSheet(_LABEL_SS)
-        lbl_bt.setFixedWidth(80)
-        row_bright.addWidget(lbl_bt)
-        btn_bt_on = QPushButton("ON")
-        btn_bt_on.setStyleSheet(_BTN_ON_SS)
-        btn_bt_on.setFixedHeight(26)
-        btn_bt_on.setToolTip("adb shell svc bluetooth enable")
-        btn_bt_on.clicked.connect(lambda: self._device_action("bluetooth_on"))
-        row_bright.addWidget(btn_bt_on)
-        btn_bt_off = QPushButton("OFF")
-        btn_bt_off.setStyleSheet(_BTN_OFF_SS)
-        btn_bt_off.setFixedHeight(26)
-        btn_bt_off.setToolTip("adb shell svc bluetooth disable")
-        btn_bt_off.clicked.connect(lambda: self._device_action("bluetooth_off"))
-        row_bright.addWidget(btn_bt_off)
-
+        row_bright.addStretch()
         ctrl_vl.addLayout(row_bright)
-        ctrl_group.setLayout(ctrl_vl)
-        vl.addWidget(ctrl_group)
 
         # Row A: Speed boost (disable/enable animations)
         row_anim = QHBoxLayout()
@@ -492,34 +468,75 @@ class SettingsWidget(QWidget):
         sep5.setStyleSheet("color: #ccc; margin-left: 8px")
         row_anim.addWidget(sep5)
 
-        lbl_stay = QLabel("🔌 Stay on charging:")
-        lbl_stay.setStyleSheet(_LABEL_SS)
-        lbl_stay.setFixedWidth(120)
-        row_anim.addWidget(lbl_stay)
-        btn_stay_on = QPushButton("ON")
-        btn_stay_on.setStyleSheet(_BTN_ON_SS)
-        btn_stay_on.setFixedHeight(26)
-        btn_stay_on.setToolTip("adb shell settings put global stay_on_while_plugged_in 3")
-        btn_stay_on.clicked.connect(lambda: self._device_action("stay_on_charging_on"))
-        row_anim.addWidget(btn_stay_on)
-        btn_stay_off = QPushButton("OFF")
-        btn_stay_off.setStyleSheet(_BTN_OFF_SS)
-        btn_stay_off.setFixedHeight(26)
-        btn_stay_off.setToolTip("adb shell settings put global stay_on_while_plugged_in 0")
-        btn_stay_off.clicked.connect(lambda: self._device_action("stay_on_charging_off"))
-        row_anim.addWidget(btn_stay_off)
+        lbl_bt = QLabel("� Bluetooth:")
+        lbl_bt.setStyleSheet(_LABEL_SS)
+        lbl_bt.setFixedWidth(80)
+        row_anim.addWidget(lbl_bt)
+        btn_bt_on = QPushButton("ON")
+        btn_bt_on.setStyleSheet(_BTN_ON_SS)
+        btn_bt_on.setFixedHeight(26)
+        btn_bt_on.setToolTip("adb shell svc bluetooth enable")
+        btn_bt_on.clicked.connect(lambda: self._device_action("bluetooth_on"))
+        row_anim.addWidget(btn_bt_on)
+        btn_bt_off = QPushButton("OFF")
+        btn_bt_off.setStyleSheet(_BTN_OFF_SS)
+        btn_bt_off.setFixedHeight(26)
+        btn_bt_off.setToolTip("adb shell svc bluetooth disable")
+        btn_bt_off.clicked.connect(lambda: self._device_action("bluetooth_off"))
+        row_anim.addWidget(btn_bt_off)
         row_anim.addStretch()
         ctrl_vl.addLayout(row_anim)
 
         ctrl_group.setLayout(ctrl_vl)
         vl.addWidget(ctrl_group)
 
-        # ── Display Settings (DPI + Resolution) ────────────────────────
+        # ── Display Settings (Width/Height + DPI + Resolution) ────────────────────────
         display_group = QGroupBox("🖥 Display Settings")
         display_group.setStyleSheet(_GROUP_BLUE_SS)
         display_vl = QVBoxLayout()
         display_vl.setContentsMargins(12, 10, 12, 12)
         display_vl.setSpacing(10)
+
+        # Two-column layout: left = width/height, right = DPI/resolution
+        display_cols = QHBoxLayout()
+        display_cols.setSpacing(16)
+
+        # ── Left column: Preview Width & Height ──────────────────────────
+        left_col = QVBoxLayout()
+        left_col.setSpacing(8)
+
+        lbl_w = QLabel("↔️ Width (px):")
+        lbl_w.setStyleSheet(_LABEL_SS)
+        lbl_w.setFixedWidth(90)
+        self._width_input = QLineEdit(str(self._data["preview_width"]))
+        self._width_input.setPlaceholderText("e.g. 400")
+        self._width_input.setMaximumWidth(90)
+        self._width_input.setStyleSheet(_INPUT_SS)
+        row_w = QHBoxLayout()
+        row_w.setSpacing(6)
+        row_w.addWidget(lbl_w)
+        row_w.addWidget(self._width_input)
+        row_w.addStretch()
+        left_col.addLayout(row_w)
+
+        lbl_h = QLabel("↕️ Height (px):")
+        lbl_h.setStyleSheet(_LABEL_SS)
+        lbl_h.setFixedWidth(90)
+        self._height_input = QLineEdit(str(self._data["preview_height"]))
+        self._height_input.setPlaceholderText("e.g. 600")
+        self._height_input.setMaximumWidth(90)
+        self._height_input.setStyleSheet(_INPUT_SS)
+        row_h = QHBoxLayout()
+        row_h.setSpacing(6)
+        row_h.addWidget(lbl_h)
+        row_h.addWidget(self._height_input)
+        row_h.addStretch()
+        left_col.addLayout(row_h)
+        left_col.addStretch()
+
+        # ── Right column: DPI density & Resolution ────────────────────────
+        right_col = QVBoxLayout()
+        right_col.setSpacing(8)
 
         # DPI row
         row_dpi = QHBoxLayout()
@@ -547,7 +564,7 @@ class SettingsWidget(QWidget):
         btn_dpi_reset.clicked.connect(lambda: self._device_action("reset_dpi"))
         row_dpi.addWidget(btn_dpi_reset)
         row_dpi.addStretch()
-        display_vl.addLayout(row_dpi)
+        right_col.addLayout(row_dpi)
 
         # Resolution row
         row_res = QHBoxLayout()
@@ -575,7 +592,19 @@ class SettingsWidget(QWidget):
         btn_res_reset.clicked.connect(lambda: self._device_action("reset_resolution"))
         row_res.addWidget(btn_res_reset)
         row_res.addStretch()
-        display_vl.addLayout(row_res)
+        right_col.addLayout(row_res)
+        right_col.addStretch()
+
+        # Vertical divider
+        vline = QFrame()
+        vline.setFrameShape(QFrame.Shape.VLine)
+        vline.setFrameShadow(QFrame.Shadow.Sunken)
+        vline.setStyleSheet("color: #ddd;")
+
+        display_cols.addLayout(left_col)
+        display_cols.addWidget(vline)
+        display_cols.addLayout(right_col, 1)
+        display_vl.addLayout(display_cols)
 
         display_group.setLayout(display_vl)
         vl.addWidget(display_group)
@@ -617,6 +646,13 @@ class SettingsWidget(QWidget):
         self._setup_keyboard_btn.clicked.connect(self.setup_keyboard_requested.emit)
         setup_btn_row1.addWidget(self._setup_keyboard_btn, 1)
 
+        self._reboot_btn = QPushButton("🔁 Reboot Device")
+        self._reboot_btn.setStyleSheet(_BTN_SS)
+        self._reboot_btn.setMinimumHeight(30)
+        self._reboot_btn.setToolTip("Reboot all devices in the table  (adb reboot)")
+        self._reboot_btn.clicked.connect(lambda: self._device_action("reboot"))
+        setup_btn_row1.addWidget(self._reboot_btn, 1)
+
         self._install_chrome_btn = QPushButton("🌐 Install Chrome")
         self._install_chrome_btn.setStyleSheet(_BTN_SS)
         self._install_chrome_btn.setMinimumHeight(30)
@@ -624,12 +660,12 @@ class SettingsWidget(QWidget):
         self._install_chrome_btn.clicked.connect(self.install_chrome_requested.emit)
         setup_btn_row1.addWidget(self._install_chrome_btn, 1)
 
-        self._reboot_btn = QPushButton("🔁 Reboot Device")
-        self._reboot_btn.setStyleSheet(_BTN_SS)
-        self._reboot_btn.setMinimumHeight(30)
-        self._reboot_btn.setToolTip("Reboot all devices in the table  (adb reboot)")
-        self._reboot_btn.clicked.connect(lambda: self._device_action("reboot"))
-        setup_btn_row1.addWidget(self._reboot_btn, 1)
+        self._install_socksdroid_btn = QPushButton("🧦 Install SocksDroid")
+        self._install_socksdroid_btn.setStyleSheet(_BTN_SS)
+        self._install_socksdroid_btn.setMinimumHeight(30)
+        self._install_socksdroid_btn.setToolTip("Install SocksDroid from /data/apps/SocksDroid.apk on all devices")
+        self._install_socksdroid_btn.clicked.connect(self.install_socksdroid_requested.emit)
+        setup_btn_row1.addWidget(self._install_socksdroid_btn, 1)
 
         setup_vl.addLayout(setup_btn_row1)
 

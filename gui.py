@@ -3,9 +3,10 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout,
     QTableWidget, QTableWidgetItem, QHBoxLayout,
     QStackedWidget, QLabel, QLineEdit, QTextEdit, QGroupBox, QComboBox,
+    QSpinBox, QDialog, QDialogButtonBox, QFormLayout,
 )
-from PySide6.QtCore import QTimer, QThread, Signal, Qt
-from PySide6.QtGui import QIcon, QCloseEvent
+from PySide6.QtCore import QTimer, QThread, Signal, Qt, QPoint
+from PySide6.QtGui import QIcon, QCloseEvent, QCursor
 
 _ANDROID_TOOLS_PATHS = [
     r"C:\android-tools\platform-tools",
@@ -19,7 +20,7 @@ _si = subprocess.STARTUPINFO()
 _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 from helpers.csv import CSVHelper
 from utils.adb import setup_adb_keyboard
-from features.chrome import install_chrome, open_url_in_chrome
+from features.chrome import install_chrome, install_socksdroid, open_url_in_chrome
 from features.ads import run_ads_automation
 from features.ads import AdsTableWidget
 from features.settings import SettingsWidget
@@ -28,6 +29,7 @@ from features.info import DeviceInfoWidget
 from features.actions import ActionsWidget
 from features.packages import PackageWidget
 from features.files import FilesWidget
+from features.activities import ActivitiesWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -51,6 +53,8 @@ class Worker(QThread):
                 self.setup_keyboard_for_all()
             elif self.task_type == "install_chrome":
                 self.install_chrome_for_all()
+            elif self.task_type == "install_socksdroid":
+                self.install_socksdroid_for_all()
             elif self.task_type == "run_ads":
                 self.run_ads_for_all()
         except Exception as e:
@@ -98,6 +102,27 @@ class Worker(QThread):
 
         self.finished.emit(f'Successfully installed Chrome for {successful_devices} out of {row_count} devices')
 
+    def install_socksdroid_for_all(self):
+        row_count = len(self.table_data)
+        if row_count == 0:
+            self.finished.emit('No devices found in table')
+            return
+
+        successful_devices = 0
+        for row in range(row_count):
+            serial = self.table_data[row].get('serial', '')
+
+            if serial:
+                try:
+                    self.progress.emit(f'Installing SocksDroid for: {serial}')
+                    install_socksdroid(serial)
+                    successful_devices += 1
+                    self.progress.emit(f'✅ Installed SocksDroid for device: {serial}')
+                except Exception as e:
+                    self.progress.emit(f'❌ Error installing SocksDroid for device {serial}: {str(e)}')
+
+        self.finished.emit(f'Successfully installed SocksDroid for {successful_devices} out of {row_count} devices')
+
     def run_ads_for_all(self):
         row_count = len(self.table_data)
         if row_count == 0:
@@ -109,40 +134,103 @@ class Worker(QThread):
             self.finished.emit('⚠️ No Ads Link provided')
             return
 
+        repeat_count = max(1, self.settings.get("repeat_count", 1))
         successful_devices = 0
-        for idx, row in enumerate(self.table_data):
+        total_runs = 0
+
+        for iteration in range(1, repeat_count + 1):
             if self._stop_flag:
-                self.finished.emit(f'⏹ Stopped — {successful_devices}/{row_count} devices completed')
+                self.finished.emit(
+                    f'⏹ Stopped at iteration {iteration}/{repeat_count} '
+                    f'— {successful_devices}/{total_runs} runs completed'
+                )
                 return
 
-            serial = row.get('serial', '')
+            if repeat_count > 1:
+                self.progress.emit(f'🔁 Iteration {iteration}/{repeat_count}')
 
-            if not serial:
-                continue
+            for idx, row in enumerate(self.table_data):
+                if self._stop_flag:
+                    self.finished.emit(
+                        f'⏹ Stopped — {successful_devices}/{total_runs} runs completed'
+                    )
+                    return
 
-            # Resolve human settings: fixed or freshly randomized per device
-            if self._human_settings_fn is not None:
-                human = self._human_settings_fn()
-                self.progress.emit(
-                    f'🎲 Randomized behavior for {serial} — '
-                    f'duration={human.get("min_duration", "?"):.0f}s  '
-                    f'profile={human.get("profile") or "auto"}'
-                )
+                serial = row.get('serial', '')
+                if not serial:
+                    continue
+
+                # Resolve human settings: fixed or freshly randomized per device
+                if self._human_settings_fn is not None:
+                    human = self._human_settings_fn()
+                    self.progress.emit(
+                        f'🎲 Randomized behavior for {serial} — '
+                        f'duration={human.get("min_duration", "?"):.0f}s  '
+                        f'profile={human.get("profile") or "auto"}'
+                    )
+                else:
+                    human = self.settings.get("human", {})
+
+                try:
+                    self.progress.emit(f'🤖 Running ads automation on: {serial}')
+                    result = run_ads_automation(serial, ads_link, human_settings=human)
+                    title = result.get('title', '') if isinstance(result, dict) else str(result)
+                    domain = result.get('domain', '') if isinstance(result, dict) else ''
+                    ads_info = f"{title} | {domain}" if domain else title
+                    successful_devices += 1
+                    self.progress.emit(f'✅ Done on {serial} — {ads_info}')
+                except Exception as e:
+                    self.progress.emit(f'❌ Error on device {serial}: {str(e)}')
+                finally:
+                    total_runs += 1
+
+        self.finished.emit(
+            f'Ads automation done: {successful_devices}/{total_runs} runs '
+            f'({repeat_count} iteration{"s" if repeat_count > 1 else ""}, {row_count} device{"s" if row_count > 1 else ""})'
+        )
+
+class PreviewOverlay(QWidget):
+    """Transparent overlay on the preview_container that captures mouse clicks
+    during hunt mode and translates them to device coordinates."""
+    coord_captured = Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active = False
+        self._device_w = 0
+        self._device_h = 0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.raise_()
+
+    def set_active(self, active: bool, device_w: int = 0, device_h: int = 0):
+        self._active = active
+        self._device_w = device_w
+        self._device_h = device_h
+        # Only intercept mouse when hunt is active
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not active)
+        if active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def mousePressEvent(self, event):
+        if not self._active:
+            super().mousePressEvent(event)
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            w = self.width()
+            h = self.height()
+            if w > 0 and h > 0 and self._device_w > 0 and self._device_h > 0:
+                dev_x = round(pos.x() * self._device_w / w)
+                dev_y = round(pos.y() * self._device_h / h)
             else:
-                human = self.settings.get("human", {})
-
-            try:
-                self.progress.emit(f'🤖 Running ads automation on: {serial}')
-                result = run_ads_automation(serial, ads_link, human_settings=human)
-                title = result.get('title', '') if isinstance(result, dict) else str(result)
-                domain = result.get('domain', '') if isinstance(result, dict) else ''
-                ads_info = f"{title} | {domain}" if domain else title
-                successful_devices += 1
-                self.progress.emit(f'✅ Done on {serial} — {ads_info}')
-            except Exception as e:
-                self.progress.emit(f'❌ Error on device {serial}: {str(e)}')
-
-        self.finished.emit(f'Ads automation done: {successful_devices}/{row_count} devices')
+                dev_x = pos.x()
+                dev_y = pos.y()
+            self.coord_captured.emit(dev_x, dev_y)
 
 class CookieLoaderGUI(QWidget):
     def __init__(self):
@@ -190,6 +278,7 @@ class CookieLoaderGUI(QWidget):
         )
         self.settings_widget.setup_keyboard_requested.connect(self.setup_keyboard_for_all)
         self.settings_widget.install_chrome_requested.connect(self.install_chrome_for_all)
+        self.settings_widget.install_socksdroid_requested.connect(self.install_socksdroid_for_all)
         self.settings_widget._get_serials_fn = self._collect_serials
 
         self.proxy_widget = ProxyWidget()
@@ -200,10 +289,15 @@ class CookieLoaderGUI(QWidget):
         self.info_widget.status_update.connect(self.update_status)
         self.actions_widget = ActionsWidget()
         self.actions_widget.status_update.connect(self.update_status)
+        self.actions_widget.hunt_mode_active.connect(self._on_hunt_mode_changed)
         self.apps_widget = PackageWidget()
         self.apps_widget.status_update.connect(self.update_status)
+        self.apps_widget.install_chrome_requested.connect(self.install_chrome_for_all)
         self.files_widget = FilesWidget()
         self.files_widget.status_update.connect(self.update_status)
+
+        self.activities_widget = ActivitiesWidget()
+        self.activities_widget.status_update.connect(self.update_status)
 
         # Preview panel (hidden by default)
         self.preview_panel = QWidget()
@@ -224,6 +318,11 @@ class CookieLoaderGUI(QWidget):
         self.preview_container.setMinimumSize(300, 500)
         self.preview_container.setStyleSheet("background: #111; border: 1px solid #555;")
         pv_layout.addWidget(self.preview_container, 1)
+
+        # Transparent overlay for hunt-mode coordinate capture
+        self._preview_overlay = PreviewOverlay(self.preview_container)
+        self._preview_overlay.coord_captured.connect(self._on_preview_click_for_hunt)
+        self.preview_container.installEventFilter(self)
 
         # State for current preview
         self._current_preview_serial = None
@@ -296,7 +395,11 @@ class CookieLoaderGUI(QWidget):
         self.files_button.clicked.connect(lambda: self._open_tab(6))
         left_layout.addWidget(self.files_button)
 
-        self.run_ads_button = QPushButton('Run Ads')
+        self.activities_button = _nav_btn('📊 Activities')
+        self.activities_button.clicked.connect(lambda: self._open_tab(7))
+        left_layout.addWidget(self.activities_button)
+
+        self.run_ads_button = QPushButton('▶ Run Ads')
         self.run_ads_button.clicked.connect(self.run_ads_for_all)
 
         self.simulator_button = _nav_btn('🤖 Simulator')
@@ -398,6 +501,28 @@ class CookieLoaderGUI(QWidget):
             "QComboBox::drop-down { border: none; width: 20px; }"
         )
         self.behavior_mode_combo.setCurrentIndex(1)  # default: Randomly different
+
+        # ── Repeat count selector ─────────────────────────────────────────
+        _combo_ss = (
+            "QComboBox {"
+            "  border: 1px solid #ddd; border-radius: 4px;"
+            "  padding: 2px 6px; background: #ffffff; color: #212121;"
+            "  font-size: 11px; min-height: 20px; max-height: 28px;"
+            "}"
+            "QComboBox:focus { border: 1px solid #1976d2; }"
+            "QComboBox::drop-down { border: none; width: 20px; }"
+        )
+        self._repeat_count: int = 1   # actual value used by run_ads_for_all
+        self.repeat_combo = QComboBox()
+        self.repeat_combo.addItems(["🔁 1× (once)", "2×", "3×", "5×", "10×", "Custom…"])
+        self.repeat_combo.setToolTip(
+            "Number of times to repeat the full automation run across all devices.\n"
+            "Choose 'Custom…' to enter any value."
+        )
+        self.repeat_combo.setStyleSheet(_combo_ss)
+        self.repeat_combo.setFixedWidth(110)
+        self.repeat_combo.currentIndexChanged.connect(self._on_repeat_combo_changed)
+
         self.view_log_button = QPushButton("📋 View Log")
         self.view_log_button.setCheckable(True)
         self.view_log_button.setChecked(False)
@@ -411,6 +536,7 @@ class CookieLoaderGUI(QWidget):
         )
         run_btn_row = QHBoxLayout()
         run_btn_row.addWidget(self.behavior_mode_combo)
+        run_btn_row.addWidget(self.repeat_combo)
         run_btn_row.addWidget(self.run_ads_button)
         run_btn_row.addWidget(self.stop_ads_button)
         run_btn_row.addWidget(self.view_log_button)
@@ -493,6 +619,9 @@ class CookieLoaderGUI(QWidget):
         # Page 6 – Files      # index 6
         self.tab_body.addWidget(self.files_widget)
 
+        # Page 7 – Activities      # index 7
+        self.tab_body.addWidget(self.activities_widget)
+
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
@@ -519,7 +648,7 @@ class CookieLoaderGUI(QWidget):
     def reset_window_title(self):
         self.setWindowTitle(self.app_name)
 
-    # TAB_INDEX: 0=Simulator, 1=Proxy, 2=Settings, 3=Info, 4=Actions
+    # TAB_INDEX: 0=Simulator, 1=Proxy, 2=Settings, 3=Info, 4=Actions, 5=Packages, 6=Files, 7=Activities
     def _open_tab(self, index: int):
         """Show tab_body and switch to the given page index."""
         self.tab_body.setCurrentIndex(index)
@@ -536,6 +665,7 @@ class CookieLoaderGUI(QWidget):
             self.actions_button,
             self.pkgs_button,
             self.files_button,
+            self.activities_button,
         ]
         self.current_active_tab = _tab_buttons[index]
         self.current_active_tab.setChecked(True)
@@ -596,6 +726,7 @@ class CookieLoaderGUI(QWidget):
         self.info_widget.set_device(serial)
         self.apps_widget.set_device(serial)
         self.files_widget.set_device(serial)
+        self.activities_widget.set_selected_serial(serial)
 
         # Only auto-load Info if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:
@@ -627,6 +758,70 @@ class CookieLoaderGUI(QWidget):
             self.update_status('⏹ Stopping after current device…')
             self.stop_ads_button.setEnabled(False)
 
+    def _on_repeat_combo_changed(self, index: int):
+        """Handle repeat count combo selection, show custom dialog for 'Custom…'."""
+        text = self.repeat_combo.currentText()
+        preset_map = {
+            "🔁 1× (once)": 1,
+            "2×": 2,
+            "3×": 3,
+            "5×": 5,
+            "10×": 10,
+        }
+        if text in preset_map:
+            self._repeat_count = preset_map[text]
+            return
+        # "Custom…" — show a small dialog with a QSpinBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set Repeat Count")
+        dlg.setMinimumWidth(280)
+        dlg.setStyleSheet(
+            "QDialog { background: #f8f9ff; }"
+            "QLabel { font-size: 11px; color: #333; }"
+            "QSpinBox {"
+            "  border: 1px solid #dce3f0; border-radius: 4px;"
+            "  padding: 2px 6px; background: #ffffff; color: #212121;"
+            "  font-size: 12px; min-height: 18px; max-height: 22px;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button {"
+            "  width: 10px; border: none;"
+            "}"
+            "QSpinBox::up-arrow { width: 0px; height: 0px; margin: 0px; }"
+            "QSpinBox::down-arrow { width: 0px; height: 0px; margin: 0px; }"
+            "QPushButton { background: #1976d2; color: white; font-weight: bold;"
+            "  padding: 5px 14px; border-radius: 4px; font-size: 11px; border: none; }"
+            "QPushButton:hover { background: #1565c0; }"
+            "QPushButton[text='Cancel'] { background: #546e7a; }"
+            "QPushButton[text='Cancel']:hover { background: #455a64; }"
+        )
+        fl = QFormLayout(dlg)
+        fl.setContentsMargins(16, 16, 16, 12)
+        fl.setSpacing(10)
+        lbl = QLabel("Number of iterations:")
+        spin = QSpinBox()
+        spin.setRange(1, 9999)
+        spin.setValue(max(1, self._repeat_count))
+        fl.addRow(lbl, spin)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        fl.addRow(btns)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._repeat_count = spin.value()
+            # Update combo label to show the chosen value
+            self.repeat_combo.blockSignals(True)
+            # Replace "Custom…" entry text temporarily to display current value
+            self.repeat_combo.setItemText(5, f"Custom ({self._repeat_count}×)")
+            self.repeat_combo.blockSignals(False)
+        else:
+            # Revert to index 0 if cancelled
+            self.repeat_combo.blockSignals(True)
+            self.repeat_combo.setCurrentIndex(0)
+            self._repeat_count = 1
+            self.repeat_combo.blockSignals(False)
+
     def install_chrome_for_all(self):
         if self.worker and self.worker.isRunning():
             self.update_status('Task already running')
@@ -637,6 +832,20 @@ class CookieLoaderGUI(QWidget):
         self.disable_buttons()
 
         self.worker = Worker("install_chrome", table_data)
+        self.worker.progress.connect(self.update_status)
+        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.start()
+
+    def install_socksdroid_for_all(self):
+        if self.worker and self.worker.isRunning():
+            self.update_status('Task already running')
+            return
+
+        table_data = self.ads_table.get_table_data()
+
+        self.disable_buttons()
+
+        self.worker = Worker("install_socksdroid", table_data)
         self.worker.progress.connect(self.update_status)
         self.worker.finished.connect(self.on_worker_finished)
         self.worker.start()
@@ -661,13 +870,15 @@ class CookieLoaderGUI(QWidget):
         self.view_log_button.setChecked(True)
 
         worker_settings = {"ads_link": ads_link}
+        repeat = getattr(self, "_repeat_count", 1)
+        worker_settings["repeat_count"] = repeat
         if behavior_mode == "Same in series":
             worker_settings["human"] = human_settings
-            self._append_log(f"▶ Starting run — behavior mode: Same in series")
+            self._append_log(f"▶ Starting run — behavior mode: Same in series | iterations: {repeat}×")
         else:
             # Pass a callable so the worker can generate fresh random settings per device
             worker_settings["human_settings_fn"] = self.ads_table.get_randomized_human_settings
-            self._append_log(f"▶ Starting run — behavior mode: Randomly different")
+            self._append_log(f"▶ Starting run — behavior mode: Randomly different | iterations: {repeat}×")
 
         self.worker = Worker("run_ads", table_data, settings=worker_settings)
         self.worker.progress.connect(self.update_status)
@@ -942,6 +1153,40 @@ class CookieLoaderGUI(QWidget):
         QTimer.singleShot(0, self.adjustSize)
 
         self.update_status('Preview closed')
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if obj is self.preview_container and event.type() == QEvent.Type.Resize:
+            self._preview_overlay.setGeometry(self.preview_container.rect())
+            self._preview_overlay.raise_()
+        return super().eventFilter(obj, event)
+
+    def _on_hunt_mode_changed(self, active: bool):
+        """Show/hide the transparent overlay on the preview container for hunt mode."""
+        dev_w = dev_h = 0
+        if active and self._current_preview_serial:
+            # Try to get device resolution via ADB
+            try:
+                r = subprocess.run(
+                    ["adb", "-s", self._current_preview_serial, "shell", "wm", "size"],
+                    capture_output=True, text=True, startupinfo=_si, timeout=5,
+                )
+                import re as _re
+                m = _re.search(r"(\d+)x(\d+)", r.stdout)
+                if m:
+                    dev_w, dev_h = int(m.group(1)), int(m.group(2))
+            except Exception:
+                pass
+        # Size overlay to cover the container
+        self._preview_overlay.setGeometry(self.preview_container.rect())
+        self._preview_overlay.set_active(active, dev_w, dev_h)
+        self._preview_overlay.raise_()
+        if active and not self.preview_panel.isVisible():
+            self.update_status("⚠ Open the phone preview first, then tap on it")
+
+    def _on_preview_click_for_hunt(self, dev_x: int, dev_y: int):
+        """Forward a preview-window click as a hunt coordinate to the actions widget."""
+        self.actions_widget.receive_preview_click(dev_x, dev_y)
 
     def closeEvent(self, event: QCloseEvent):
         """Ensure scrcpy preview is closed when the app is closing."""
