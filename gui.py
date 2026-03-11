@@ -30,6 +30,7 @@ from features.actions import ActionsWidget
 from features.packages import PackageWidget
 from features.files import FilesWidget
 from features.activities import ActivitiesWidget
+from features.toolbox import ToolboxWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -287,7 +288,7 @@ class CookieLoaderGUI(QWidget):
 
     def initUI(self):
         self.setWindowTitle(self.app_name)
-        self.setGeometry(300, 300, 900, 600)
+        self.setGeometry(300, 300, 940, 600)
         self.setWindowIcon(QIcon(self.icon))
 
         layout = QHBoxLayout()
@@ -327,6 +328,9 @@ class CookieLoaderGUI(QWidget):
 
         self.activities_widget = ActivitiesWidget()
         self.activities_widget.status_update.connect(self.update_status)
+
+        self.toolbox_widget = ToolboxWidget()
+        self.toolbox_widget.status_update.connect(self.update_status)
 
         # Preview panel (hidden by default)
         self.preview_panel = QWidget()
@@ -439,6 +443,10 @@ class CookieLoaderGUI(QWidget):
         self.activities_button = _nav_btn('📊 Activities')
         self.activities_button.clicked.connect(lambda: self._open_tab(7))
         left_layout.addWidget(self.activities_button)
+
+        self.toolbox_button = _nav_btn('🛠 Toolbox')
+        self.toolbox_button.clicked.connect(lambda: self._open_tab(8))
+        left_layout.addWidget(self.toolbox_button)
 
         self.run_ads_button = QPushButton('▶ Run Ads')
         self.run_ads_button.clicked.connect(self.run_ads_for_all)
@@ -675,6 +683,9 @@ class CookieLoaderGUI(QWidget):
         # Page 7 – Activities      # index 7
         self.tab_body.addWidget(self.activities_widget)
 
+        # Page 8 – Toolbox      # index 8
+        self.tab_body.addWidget(self.toolbox_widget)
+
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
@@ -719,6 +730,7 @@ class CookieLoaderGUI(QWidget):
             self.pkgs_button,
             self.files_button,
             self.activities_button,
+            self.toolbox_button,
         ]
         self.current_active_tab = _tab_buttons[index]
         self.current_active_tab.setChecked(True)
@@ -793,6 +805,7 @@ class CookieLoaderGUI(QWidget):
         self.apps_widget.set_device(serial)
         self.files_widget.set_device(serial)
         self.activities_widget.set_selected_serial(serial)
+        self.toolbox_widget.set_device(serial)
 
         # Only auto-load Info if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:

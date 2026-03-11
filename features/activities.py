@@ -460,26 +460,77 @@ def parse_free(text: str) -> Tuple[int, int, int, int]:
 def parse_top_cpu(text: str) -> Tuple[float, float, float]:
     """
     Parse 'top -n 1' output.
-    Returns (user_pct, sys_pct, idle_pct).
-    Handles 'Cpu(s): X.X us, X.X sy' and Android '800%cpu X%user X%sys X%idle' formats.
+    Returns (user_pct, sys_pct, idle_pct) — kept for backward-compat.
+    Use parse_top_cpu_full() for the complete breakdown.
     """
-    # Android multi-core format: "800%cpu 10%user 0%nice 6%sys 784%idle ..."
-    m = re.search(r"(\d+\.?\d*)%user\s+\S+\s+(\d+\.?\d*)%sys\s+(\d+\.?\d*)%idle", text)
-    if m:
+    d = parse_top_cpu_full(text)
+    return d["user"], d["sys"], d["idle"]
+
+
+def parse_top_cpu_full(text: str) -> dict:
+    """
+    Parse 'top -n 1' output and return a dict with normalised per-core percentages.
+
+    Keys: user, nice, sys, idle, iow, irq, sirq, host
+    Handles Android multi-core format:
+        800%cpu  13%user  2%nice  23%sys  759%idle  0%iow  1%irq  1%sirq  0%host
+    and Linux desktop format:
+        %Cpu(s):  3.5 us,  1.2 sy,  0.0 ni, 94.0 id,  0.2 wa,  0.0 hi,  0.8 si
+    """
+    empty = dict(user=0.0, nice=0.0, sys=0.0, idle=100.0, iow=0.0, irq=0.0, sirq=0.0, host=0.0)
+
+    # ── Android multi-core format ─────────────────────────────────────────
+    # e.g. "800%cpu  13%user  2%nice  23%sys  759%idle  0%iow  1%irq  1%sirq  0%host"
+    if "%cpu" in text:
         cores_m = re.search(r"(\d+)%cpu", text)
-        cores = int(cores_m.group(1)) / 100 if cores_m else 1.0
-        user  = float(m.group(1)) / cores
-        sys_  = float(m.group(2)) / cores
-        idle  = float(m.group(3)) / cores
-        return user, sys_, idle
-    # Linux format: "%Cpu(s): X.X us, X.X sy, ..."
-    m2 = re.search(r"(\d+\.?\d*)\s*us[,\s]+(\d+\.?\d*)\s*sy", text, re.IGNORECASE)
+        cores = int(cores_m.group(1)) / 100.0 if cores_m else 1.0
+        if cores < 1.0:
+            cores = 1.0
+
+        def _field(name: str) -> float:
+            m = re.search(r"(\d+\.?\d*)%" + name, text)
+            return float(m.group(1)) / cores if m else 0.0
+
+        result = dict(
+            user  = _field("user"),
+            nice  = _field("nice"),
+            sys   = _field("sys"),
+            idle  = _field("idle"),
+            iow   = _field("iow"),
+            irq   = _field("irq"),
+            sirq  = _field("sirq"),
+            host  = _field("host"),
+        )
+        return result
+
+    # ── Linux desktop format ──────────────────────────────────────────────
+    # e.g. "%Cpu(s):  3.5 us,  1.2 sy,  0.0 ni, 94.0 id,  0.2 wa,  0.0 hi,  0.8 si"
+    m2 = re.search(
+        r"(\d+\.?\d*)\s*us[,\s]+(\d+\.?\d*)\s*sy[,\s]+(\d+\.?\d*)\s*ni[,\s]+"
+        r"(\d+\.?\d*)\s*id[,\s]+(\d+\.?\d*)\s*wa[,\s]+(\d+\.?\d*)\s*hi[,\s]+(\d+\.?\d*)\s*si",
+        text, re.IGNORECASE,
+    )
     if m2:
-        user = float(m2.group(1))
-        sys_ = float(m2.group(2))
+        return dict(
+            user  = float(m2.group(1)),
+            sys   = float(m2.group(2)),
+            nice  = float(m2.group(3)),
+            idle  = float(m2.group(4)),
+            iow   = float(m2.group(5)),
+            irq   = float(m2.group(6)),
+            sirq  = float(m2.group(7)),
+            host  = 0.0,
+        )
+
+    # Minimal fallback: just us + sy
+    m3 = re.search(r"(\d+\.?\d*)\s*us[,\s]+(\d+\.?\d*)\s*sy", text, re.IGNORECASE)
+    if m3:
+        user = float(m3.group(1))
+        sys_ = float(m3.group(2))
         idle = max(0.0, 100.0 - user - sys_)
-        return user, sys_, idle
-    return 0.0, 0.0, 100.0
+        return dict(user=user, nice=0.0, sys=sys_, idle=idle, iow=0.0, irq=0.0, sirq=0.0, host=0.0)
+
+    return empty
 
 
 # ── Background metrics worker ─────────────────────────────────────────────────
@@ -533,6 +584,126 @@ class _MetricsWorker(QThread):
         if m2:
             charging = int(m2.group(1)) == 2
         self.battery_ready.emit(level, charging)
+
+
+# ── Real-time Top process worker ──────────────────────────────────────────────
+
+class _TopWorker(QThread):
+    """
+    Continuously runs `adb shell top -b -d 2` and emits parsed results.
+
+    Signals:
+        header_ready(str)   – one-line summary: tasks + cpu + mem
+        rows_ready(list)    – list of dicts per process
+    """
+    header_ready = Signal(str)
+    rows_ready   = Signal(list)
+
+    def __init__(self, serial: str, interval: int = 2):
+        super().__init__()
+        self.serial   = serial
+        self.interval = max(1, interval)
+        self._running = True
+
+    def stop(self):
+        self._running = False
+        self.requestInterruption()
+        self.quit()
+        self.wait(3000)
+
+    def run(self):
+        import subprocess as _sp
+        _startup = subprocess.STARTUPINFO()
+        _startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        while self._running and not self.isInterruptionRequested():
+            try:
+                r = _sp.run(
+                    ["adb", "-s", self.serial, "shell", "top", "-b", "-n", "1"],
+                    startupinfo=_startup,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                text = r.stdout or ""
+                if text:
+                    header, rows = _parse_top_output(text)
+                    self.header_ready.emit(header)
+                    self.rows_ready.emit(rows)
+            except Exception:
+                pass
+
+            # Sleep in small chunks so we can exit quickly
+            for _ in range(self.interval * 5):
+                if not self._running or self.isInterruptionRequested():
+                    return
+                self.msleep(200)
+
+
+def _parse_top_output(text: str) -> Tuple[str, list]:
+    """
+    Parse `top -b -n 1` output.
+
+    Returns:
+        header (str)  – formatted summary line
+        rows   (list) – list of dicts with keys:
+                        pid, user, pr, ni, virt, res, shr, s, cpu, mem, time, args
+    """
+    header_parts: list[str] = []
+    rows: list[dict] = []
+    in_processes = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        low = stripped.lower()
+
+        # ── Column header line — marks start of process list ─────────────
+        # Matches "PID USER PR NI ..." (first token must be "pid")
+        if re.match(r"pid\s+user", low):
+            in_processes = True
+            continue
+
+        # ── Process rows ──────────────────────────────────────────────────
+        if in_processes:
+            # Format: PID USER PR NI VIRT RES SHR S [%CPU] %MEM TIME+ ARGS
+            m = re.match(
+                r"\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+([RSDZIT])\s+"
+                r"(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\S+)\s*(.*)",
+                stripped,
+            )
+            if m:
+                rows.append({
+                    "pid":  m.group(1),
+                    "user": m.group(2),
+                    "pr":   m.group(3),
+                    "ni":   m.group(4),
+                    "virt": m.group(5),
+                    "res":  m.group(6),
+                    "shr":  m.group(7),
+                    "s":    m.group(8),
+                    "cpu":  m.group(9),
+                    "mem":  m.group(10),
+                    "time": m.group(11),
+                    "args": m.group(12).strip(),
+                })
+            continue
+
+        # ── Header summary lines (before the process list) ────────────────
+        if low.startswith("tasks:"):
+            header_parts.append(stripped)
+        elif low.startswith("mem:") or low.startswith("swap:"):
+            header_parts.append(stripped)
+        elif re.match(r"\d+%cpu", low):
+            # e.g. "800%cpu  3%user  0%nice  9%sys 786%idle ..."
+            header_parts.append(stripped)
+
+    header = "  |  ".join(header_parts) if header_parts else ""
+    return header, rows
 
 
 # ── Main Activities widget ────────────────────────────────────────────────────
@@ -685,17 +856,17 @@ class ActivitiesWidget(QWidget):
             (_btn_purple("🔋 BatteryStats"),    ("shell", "dumpsys", "batterystats")),
             (_btn_outline("📷 Camera"),         ("shell", "dumpsys", "media.camera")),
             (_btn_outline("📲 Telephony"),      ("shell", "dumpsys", "telephony.registry")),
-            # ── new dumpsys shortcuts ────────────────────────────────────
-            (_btn_primary("🏃 Activity Dump"),  ("shell", "dumpsys", "activity")),
-            (_btn_warning("⚡ Power Dump"),     ("shell", "dumpsys", "power")),
-            (_btn_teal("🖥 Window Dump"),       ("shell", "dumpsys", "window")),
-            (_btn_success("🧠 Memory Dump"),    ("shell", "dumpsys", "meminfo")),
-            (_btn_purple("📊 Usage Dump"),      ("shell", "dumpsys", "usagestats")),
-            (_btn_secondary("📦 Package Dump"), ("shell", "dumpsys", "package")),
+            (_btn_primary("🏃 Activity"),  ("shell", "dumpsys", "activity")),
+            (_btn_warning("⚡ Power"),     ("shell", "dumpsys", "power")),
+            (_btn_teal("🖥 Window"),       ("shell", "dumpsys", "window")),
+            (_btn_success("🧠 Memory"),    ("shell", "dumpsys", "meminfo")),
+            (_btn_purple("📊 Usage"),      ("shell", "dumpsys", "usagestats")),
+            (_btn_secondary("📦 Package"), ("shell", "dumpsys", "package")),
             (_btn_danger("🔔 Notification"),    ("shell", "dumpsys", "notification")),
-            (_btn_outline("🌐 WiFi Dump"),      ("shell", "dumpsys", "wifi")),
-            (_btn_teal("📡 Network Dumps"),     ("shell", "dumpsys", "netstats")),
-            (_btn_success("📍 Location Dumps"), ("shell", "dumpsys", "location")),
+            (_btn_outline("🌐 WiFi"),      ("shell", "dumpsys", "wifi")),
+            (_btn_teal("📡 Network"),     ("shell", "dumpsys", "netstats")),
+            (_btn_success("📍 Location"), ("shell", "dumpsys", "location")),
+            (_btn_warning("🎨 Graphics"),  ("shell", "dumpsys", "gfxinfo")),
         ]
 
         for idx, (btn, cmd) in enumerate(dump_items):

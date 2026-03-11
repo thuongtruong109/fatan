@@ -274,16 +274,6 @@ adb shell service call power 12
 adb shell service call window 18
 ```
 
-### query IMEI (trên Android cũ)
-
-```bash
-adb shell service call iphonesubinfo 1
-```
-
-👉 Đây là **level rất thấp của framework**.
-
----
-
 # 2️⃣ Inject input ở mức kernel event
 
 Thay vì `input tap`, dùng **event device**.
@@ -606,3 +596,25 @@ adb shell dumpsys binder_calls_stats
 ```
 
 Xem IPC calls của toàn hệ thống.
+
+Xem route
+
+adb shell ip route
+
+Xem IP: adb shell ip addr show
+
+Ping server: adb shell ping google.com
+
+Disk usage: adb shell df
+
+ROM modding
+
+Remount system
+
+adb remount
+
+Mount system RW
+
+adb shell mount -o rw,remount /system
+
+<!-- ở tab proxy, thêm 1 section ping để test repsonse time của proxy/sock, check ip của proxy/sock, check status của proxy/sock (support nhiều loại proxy và sock, sock5, sock4....) -->

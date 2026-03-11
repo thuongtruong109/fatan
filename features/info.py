@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox,
     QCheckBox, QComboBox, QScrollArea, QFrame, QSizePolicy,
-    QFileDialog, QSpinBox,
+    QFileDialog, QSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
@@ -51,6 +52,92 @@ def _first(*values: str) -> str:
 def _re_first(pattern: str, text: str, flags: int = 0) -> str:
     m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else ""
+
+def _decode_iphonesubinfo(raw: str) -> str:
+    """Decode the UTF-16LE parcel output of `service call iphonesubinfo N`.
+
+    Handles two output formats:
+
+    Multi-line addressed format (most Android versions):
+      0x00000000: 00000000 0000000f 00350033 00350033 '........3.5.3.5.'
+
+    Single-line inline format (some devices/ROMs):
+      Result: Parcel(00000000 00000002 00310030 00000000 '........0.1.....')
+
+    Each 32-bit word is printed as a big-endian hex integer representing the
+    value, but the actual bytes in device memory are little-endian, so the word
+    '00350033' is stored as bytes 0x33 0x00 0x35 0x00 (i.e. two UTF-16LE chars:
+    0x0033='3' and 0x0035='5').
+
+    We collect all words globally (across lines), skip the first two (status
+    word i=0 and string-length word i=1), then decode pairs of bytes.
+    """
+    all_words: list = []
+    for line in raw.splitlines():
+        # Format 1: "  0x00000000: 00000000 0000000f 00350033 ..."
+        m = re.match(r"\s*0x[0-9a-f]+:\s+([0-9a-f\s]+)", line, re.IGNORECASE)
+        if m:
+            all_words.extend(w for w in m.group(1).split() if len(w) == 8)
+            continue
+        # Format 2: "Result: Parcel(00000000 00000002 00310030 ... '...')"
+        m2 = re.search(r"Parcel\(([0-9a-f\s]+)", line, re.IGNORECASE)
+        if m2:
+            # Strip the trailing ASCII representation after the last hex word
+            hex_part = re.sub(r"'[^']*'.*$", "", m2.group(1))
+            all_words.extend(w for w in hex_part.split() if len(w) == 8)
+
+    chars = []
+    for i, word in enumerate(all_words):
+        if i < 2:
+            continue  # skip status (i=0) and string-length (i=1) words
+        # The word is printed as a 32-bit big-endian hex value.
+        # The device stores it little-endian in memory, so the actual byte layout is:
+        #   word '00350033' → val=0x00350033
+        #   memory bytes: 0x33 0x00 0x35 0x00  (LE u32)
+        #   UTF-16LE pair: char0 = 0x0033='3' (bytes 0-1),  char1 = 0x0035='5' (bytes 2-3)
+        # In terms of the printed value: char0 = low 16-bits, char1 = high 16-bits
+        # But the string is stored MSB-word first in the parcel, so high word comes
+        # BEFORE low word in character order:
+        #   char1 (high 16) is the FIRST char, char0 (low 16) is the SECOND.
+        val = int(word, 16)
+        char_first  = (val >> 16) & 0xFFFF  # high 16-bit word → first char
+        char_second = val & 0xFFFF           # low  16-bit word → second char
+        for cp in (char_first, char_second):
+            if cp == 0:
+                continue  # null / padding
+            if 0x20 <= cp <= 0x7e:
+                chars.append(chr(cp))
+
+    return "".join(chars).strip()
+
+
+def _decode_iphonesubinfo_int(raw: str) -> str:
+    """Decode a parcel that returns a single int32 (e.g. iphonesubinfo 5).
+
+    The shell output looks like:
+      Result: Parcel(
+        0x00000000: 00000000 00000001                   '........')
+    Word i=0 is status (0 = OK), word i=1 is the int32 value.
+    Returns the value as a string, or "" if not decodable.
+    """
+    all_words: list = []
+    for line in raw.splitlines():
+        m = re.match(r"\s*0x[0-9a-f]+:\s+([0-9a-f\s]+)", line, re.IGNORECASE)
+        if m:
+            all_words.extend(w for w in m.group(1).split() if len(w) == 8)
+            continue
+        m2 = re.search(r"Parcel\(([0-9a-f\s]+)", line, re.IGNORECASE)
+        if m2:
+            hex_part = re.sub(r"'[^']*'.*$", "", m2.group(1))
+            all_words.extend(w for w in hex_part.split() if len(w) == 8)
+    # Word 0 = status (must be 0 for OK), word 1 = the int32 result
+    if len(all_words) >= 2 and all_words[0] == "00000000":
+        try:
+            val = int(all_words[1], 16)
+            return str(val)
+        except ValueError:
+            pass
+    return ""
 
 # ── Background fetch worker ──────────────────────────────────────────────
 class _FetchWorker(QThread):
@@ -123,20 +210,18 @@ class _FetchWorker(QThread):
                 if m:
                     imei = m.group(1)
                     break
-            # Method 2: service call iphonesubinfo 1 (older Android ≤ 7)
+            # Method 2: service call iphonesubinfo 1 — decode UTF-16LE parcel hex output
             if not imei:
                 raw = _shell(s, "service call iphonesubinfo 1", timeout=6)
-                chars = re.findall(r"'([0-9.]+)'", raw)
-                candidate = "".join(c.replace(".", "") for c in chars)
-                if len(candidate) >= 14:
-                    imei = candidate[:15]
-            # Method 3: service call phone 4 (some custom ROMs)
+                candidate = _decode_iphonesubinfo(raw)
+                if re.fullmatch(r"\d{14,15}", candidate):
+                    imei = candidate
+            # Method 3: service call phone 4 (some custom ROMs) — decode UTF-16LE parcel
             if not imei:
                 raw = _shell(s, "service call phone 4", timeout=5)
-                chars = re.findall(r"'([0-9.]+)'", raw)
-                candidate = "".join(c.replace(".", "") for c in chars)
-                if len(candidate) >= 14:
-                    imei = candidate[:15]
+                candidate = _decode_iphonesubinfo(raw)
+                if re.fullmatch(r"\d{14,15}", candidate):
+                    imei = candidate
             # Method 4: getprop fallbacks
             if not imei:
                 imei = _first(
@@ -144,6 +229,25 @@ class _FetchWorker(QThread):
                     _prop(s, "ril.imei"),
                     _prop(s, "gsm.imei"),
                 )
+
+            # ── Subscription Index (iphonesubinfo 5 → sub-ID) ────────────
+            # Some devices encode this as a UTF-16LE string (e.g. "10"),
+            # others return a raw int32. Try string decoder first, fall back
+            # to int decoder so both formats are covered.
+            subscription_index = ""
+            try:
+                sub_raw = _shell(s, "service call iphonesubinfo 5", timeout=6)
+                # Try UTF-16LE string decode first (handles inline Parcel format)
+                sub_candidate = _decode_iphonesubinfo(sub_raw)
+                if re.fullmatch(r"-?\d+", sub_candidate):
+                    subscription_index = sub_candidate
+                # Fall back to int32 decode
+                if not subscription_index:
+                    sub_candidate = _decode_iphonesubinfo_int(sub_raw)
+                    if sub_candidate:
+                        subscription_index = sub_candidate
+            except Exception:
+                pass
 
             # ── SIM / Telephony ───────────────────────────────────────────
             tel  = _shell(s, "dumpsys telephony.registry", timeout=8)
@@ -284,13 +388,14 @@ class _FetchWorker(QThread):
                 "fingerprint":   fingerprint,
                 "imei":          imei,
                 "sim_code":      sim_code,
-                "iccid":         iccid,
-                "subscriber_id": subscriber_id,
-                "phone_number":  phone,
-                "latitude":      lat,
-                "longitude":     lon,
-                "wifi_name":     wifi_name,
-                "uptime":        uptime,
+                "iccid":              iccid,
+                "subscriber_id":      subscriber_id,
+                "subscription_index": subscription_index,
+                "phone_number":       phone,
+                "latitude":           lat,
+                "longitude":          lon,
+                "wifi_name":          wifi_name,
+                "uptime":             uptime,
             })
         except Exception as e:
             self.error.emit(str(e))
@@ -600,6 +705,7 @@ class DeviceInfoWidget(QWidget):
         self._worker: _FetchWorker | None = None
         self._change_workers: list[QThread] = []
         self._metrics_worker = None
+        self._top_worker = None
         self._auto_timer = QTimer()
         self._auto_timer.timeout.connect(self._refresh_metrics)
         self._build_ui()
@@ -611,6 +717,8 @@ class DeviceInfoWidget(QWidget):
                 self._metrics_worker.stop()
             else:
                 self._metrics_worker.quit()
+        if self._top_worker and self._top_worker.isRunning():
+            self._top_worker.stop()
 
     # ── public API ───────────────────────────────────────────────────────
     def set_device(self, serial: str):
@@ -633,12 +741,16 @@ class DeviceInfoWidget(QWidget):
             self._diag_run_free()
             self._diag_run_top()
             self._diag_run_df()
+            self._diag_run_procrank()
+            # Start real-time top worker
+            self._start_top_worker()
             # Auto-start live metrics refresh
             if not self._metrics_auto_btn.isChecked():
                 self._metrics_auto_btn.setChecked(True)
             else:
                 self._refresh_metrics()
         else:
+            self._stop_top_worker()
             if self._metrics_auto_btn.isChecked():
                 self._metrics_auto_btn.setChecked(False)
 
@@ -748,16 +860,18 @@ class DeviceInfoWidget(QWidget):
         f1.addRow(_lbl("⏱ Uptime"),        self._f_uptime)
         # ── Group 2: SIM / Telephony ─────────────────────────────────────
         g2, f2 = _group("📡 SIM / Telephony")
-        self._f_imei    = _field()
-        self._f_simcode = _field()
-        self._f_iccid   = _field()
-        self._f_subid   = _field()
-        self._f_phone   = _field()
+        self._f_imei      = _field()
+        self._f_simcode   = _field()
+        self._f_iccid     = _field()
+        self._f_subid     = _field()
+        self._f_sub_index = _field()
+        self._f_phone     = _field()
 
         f2.addRow(_lbl("🔑 IMEI"),              self._f_imei)
         f2.addRow(_lbl("📶 SIM Code"),           self._f_simcode)
         f2.addRow(_lbl("🪪 ICCID"),              self._f_iccid)
         f2.addRow(_lbl("🆔 Subscriber ID"),      self._f_subid)
+        f2.addRow(_lbl("🔢 Sub. Index"),         self._f_sub_index)
         f2.addRow(_lbl("📞 Phone Number"),       self._f_phone)
 
         # ── Group 3: Location / Network ──────────────────────────────────
@@ -911,8 +1025,8 @@ class DeviceInfoWidget(QWidget):
 
         # ── System Diagnostics ────────────────────────────────────────────
         from features.activities import (
-            _DonutRow, _SparklineChart, _BatteryBar, _MetricsWorker,
-            parse_free, parse_top_cpu, parse_df,
+            _DonutRow, _SparklineChart, _BatteryBar, _MetricsWorker, _TopWorker,
+            parse_free, parse_df,
             _btn_primary, _btn_success,
         )
 
@@ -992,33 +1106,22 @@ class DeviceInfoWidget(QWidget):
         diag_vl.setSpacing(8)
 
         # — Buttons row: Refresh only —
-        diag_btn_grid = QGridLayout()
-        diag_btn_grid.setSpacing(6)
+        diag_btn_row = QHBoxLayout()
+        diag_btn_row.setSpacing(6)
 
         b_refresh = _btn_primary("🔄 Refresh Charts")
-
         b_refresh.clicked.connect(self._diag_refresh_all)
+        diag_btn_row.addWidget(b_refresh)
+        diag_btn_row.addStretch()
+        diag_vl.addLayout(diag_btn_row)
 
-        diag_btn_grid.addWidget(b_refresh, 0, 0)
-        diag_vl.addLayout(diag_btn_grid)
-
-        # — 2-column layout: left = CPU + Memory, right = Storage Partitions —
+        # — 2-column layout: left = Memory, right = Storage Partitions —
         diag_cols = QHBoxLayout()
         diag_cols.setSpacing(12)
 
-        # Left column: CPU Breakdown (top) + Memory (bottom)
+        # Left column: Memory
         left_diag_col = QVBoxLayout()
         left_diag_col.setSpacing(8)
-
-        _cpu_lbl = QLabel("⚡ CPU Breakdown")
-        _cpu_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
-        left_diag_col.addWidget(_cpu_lbl)
-        self._diag_cpu_donuts = _DonutRow([
-            ("user", "User",   QColor("#1976d2")),
-            ("sys",  "System", QColor("#d32f2f")),
-            ("idle", "Idle",   QColor("#388e3c")),
-        ], size=100)
-        left_diag_col.addWidget(self._diag_cpu_donuts)
 
         _ram_lbl = QLabel("🧠 Memory")
         _ram_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
@@ -1065,14 +1168,80 @@ class DeviceInfoWidget(QWidget):
         diag_cols.addWidget(right_diag_w, 1)
 
         diag_vl.addLayout(diag_cols)
+
+        # — Procrank process memory table —
+        _proc_lbl = QLabel("🔬 Process Memory (procrank)")
+        _proc_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #555;")
+        diag_vl.addWidget(_proc_lbl)
+
+        self._procrank_table = QTableWidget()
+        self._procrank_table.setColumnCount(7)
+        self._procrank_table.setHorizontalHeaderLabels(["PID", "Vss(K)", "Rss(K)", "Pss(K)", "Uss(K)", "Swap(K)", "Process"])
+        self._procrank_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._procrank_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._procrank_table.setAlternatingRowColors(True)
+        self._procrank_table.verticalHeader().hide()
+        self._procrank_table.setFixedHeight(200)
+        ph = self._procrank_table.horizontalHeader()
+        ph.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        for _ci in range(6):
+            ph.setSectionResizeMode(_ci, QHeaderView.ResizeMode.ResizeToContents)
+        self._procrank_table.setStyleSheet(
+            "QTableWidget { font-size: 10px; gridline-color: #e0e0e0; }"
+            "QHeaderView::section { font-weight: bold; background: #f0f0f0; font-size: 10px; }"
+        )
+        diag_vl.addWidget(self._procrank_table)
+
+        self._procrank_summary_lbl = QLabel("")
+        self._procrank_summary_lbl.setStyleSheet("font-size: 10px; color: #555; padding: 2px 0;")
+        diag_vl.addWidget(self._procrank_summary_lbl)
+
         diag_group.setLayout(diag_vl)
         inner_vl.addWidget(diag_group)
+
+        # ── Real-time Top Process Table ───────────────────────────────────
+        top_group = QGroupBox("📊 Real-time CPU Processes")
+        top_group.setStyleSheet(_GROUP_SS)
+        top_vl = QVBoxLayout()
+        top_vl.setContentsMargins(10, 10, 10, 10)
+        top_vl.setSpacing(6)
+
+        self._top_header_lbl = QLabel("")
+        self._top_header_lbl.setStyleSheet(
+            "font-size: 10px; color: #1976d2; padding: 2px 6px;"
+            " background: #e3f2fd; border-radius: 3px;"
+        )
+        self._top_header_lbl.setWordWrap(True)
+        top_vl.addWidget(self._top_header_lbl)
+
+        self._top_table = QTableWidget()
+        self._top_table.setColumnCount(11)
+        self._top_table.setHorizontalHeaderLabels(
+            ["PID", "USER", "PR", "NI", "VIRT", "RES", "SHR", "S", "%CPU", "%MEM", "ARGS"]
+        )
+        self._top_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._top_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._top_table.setAlternatingRowColors(True)
+        self._top_table.verticalHeader().hide()
+        self._top_table.setFixedHeight(220)
+        _th = self._top_table.horizontalHeader()
+        _th.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)  # ARGS stretches
+        for _ci in range(10):
+            _th.setSectionResizeMode(_ci, QHeaderView.ResizeMode.ResizeToContents)
+        self._top_table.setStyleSheet(
+            "QTableWidget { font-size: 10px; gridline-color: #e0e0e0; }"
+            "QHeaderView::section { font-weight: bold; background: #f0f0f0; font-size: 10px; }"
+        )
+        top_vl.addWidget(self._top_table)
+
+        top_group.setLayout(top_vl)
+        inner_vl.addWidget(top_group)
 
         # Keep references for use in methods
         self._DonutRow = _DonutRow
         self._MetricsWorker = _MetricsWorker
+        self._TopWorker = _TopWorker
         self._parse_free = parse_free
-        self._parse_top_cpu = parse_top_cpu
         self._parse_df = parse_df
 
         inner_vl.addStretch()
@@ -1087,7 +1256,7 @@ class DeviceInfoWidget(QWidget):
             self._f_cpu_abi, self._f_resolution, self._f_ram,
             self._f_uptime,
             self._f_imei, self._f_simcode, self._f_iccid,
-            self._f_subid, self._f_phone,
+            self._f_subid, self._f_sub_index, self._f_phone,
             self._f_lat, self._f_lon, self._f_wifi,
         ]
 
@@ -1130,6 +1299,7 @@ class DeviceInfoWidget(QWidget):
             (self._f_simcode,      "sim_code"),
             (self._f_iccid,        "iccid"),
             (self._f_subid,        "subscriber_id"),
+            (self._f_sub_index,    "subscription_index"),
             (self._f_phone,        "phone_number"),
             (self._f_lat,          "latitude"),
             (self._f_lon,          "longitude"),
@@ -1198,6 +1368,7 @@ class DeviceInfoWidget(QWidget):
         self._diag_run_free()
         self._diag_run_top()
         self._diag_run_df()
+        self._diag_run_procrank()
 
     def _diag_run_free(self):
         if not self._serial:
@@ -1223,24 +1394,7 @@ class DeviceInfoWidget(QWidget):
             pass
 
     def _diag_run_top(self):
-        if not self._serial:
-            return
-        try:
-            import subprocess as _sp
-            r = _sp.run(
-                ["adb", "-s", self._serial, "shell", "top", "-n", "1"],
-                startupinfo=_si, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=20,
-            )
-            output = r.stdout or r.stderr or "(no output)"
-            user, sys_, idle = self._parse_top_cpu(output)
-            total = user + sys_ + idle
-            if total > 0:
-                self._diag_cpu_donuts.update_chart("user", user,  100.0, f"{user:.1f}%")
-                self._diag_cpu_donuts.update_chart("sys",  sys_,  100.0, f"{sys_:.1f}%")
-                self._diag_cpu_donuts.update_chart("idle", idle,  100.0, f"{idle:.1f}%")
-        except Exception:
-            pass
+        pass  # CPU breakdown charts removed; top process table is updated by _TopWorker
 
     def _diag_run_df(self):
         if not self._serial:
@@ -1289,6 +1443,146 @@ class DeviceInfoWidget(QWidget):
             pass
 
     # ── Live Device Metrics helpers ───────────────────────────────────────
+
+    def _diag_run_procrank(self):
+        if not self._serial:
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["adb", "-s", self._serial, "shell", "procrank"],
+                startupinfo=_si, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            output = (r.stdout or "").strip()
+
+            # Fallback: procrank not available → use dumpsys meminfo
+            if not output or "not found" in output.lower() or "permission denied" in output.lower() or "error" in output.lower():
+                r2 = _sp.run(
+                    ["adb", "-s", self._serial, "shell", "dumpsys", "meminfo"],
+                    startupinfo=_si, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=20,
+                )
+                output2 = (r2.stdout or "").strip()
+                self._populate_meminfo_table(output2)
+                return
+
+            self._populate_procrank_table(output)
+        except Exception:
+            pass
+
+    def _populate_procrank_table(self, output: str):
+        """Parse procrank output and fill the table."""
+        rows = []
+        summary = ""
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith("PID") or line.startswith("----"):
+                continue
+            # Summary lines: "RAM:" or "ZRAM:"
+            if re.match(r"(RAM|ZRAM):", line, re.IGNORECASE):
+                summary = (summary + "  " + line).strip() if summary else line
+                continue
+            # procrank line: PID Vss Rss Pss Uss [Swap] cmdline
+            # format: " 1234  1234K  1234K  1234K  1234K  1234K  /init"
+            m = re.match(
+                r"(\d+)\s+([\d]+)K\s+([\d]+)K\s+([\d]+)K\s+([\d]+)K(?:\s+([\d]+)K)?\s+(.+)",
+                line,
+            )
+            if m:
+                pid, vss, rss, pss, uss = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+                swap = m.group(6) or "0"
+                proc = m.group(7).strip()
+                rows.append((pid, vss, rss, pss, uss, swap, proc))
+
+        self._procrank_table.setRowCount(0)
+        self._procrank_table.setHorizontalHeaderLabels(["PID", "Vss(K)", "Rss(K)", "Pss(K)", "Uss(K)", "Swap(K)", "Process"])
+        for r_data in rows:
+            ri = self._procrank_table.rowCount()
+            self._procrank_table.insertRow(ri)
+            for ci, val in enumerate(r_data):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if ci < 6 else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self._procrank_table.setItem(ri, ci, item)
+
+        self._procrank_summary_lbl.setText(summary)
+
+    def _populate_meminfo_table(self, output: str):
+        """Fallback: parse `dumpsys meminfo` and populate the table.
+
+        dumpsys meminfo format (relevant section):
+          ** MEMINFO in pid 1234 [com.example.app] **
+          ...
+          TOTAL PSS:    4567  TOTAL RSS:  8901  ...
+
+        Or the summary section at top:
+          Total PSS by process:
+               12345 kB: com.android.systemui (pid 1234)
+               ...
+        We parse both forms.
+        """
+        self._procrank_table.setRowCount(0)
+        self._procrank_table.setHorizontalHeaderLabels(
+            ["PID", "PSS(K)", "Rss(K)", "Pss(K)", "Uss(K)", "Swap(K)", "Process"]
+        )
+
+        rows = []  # (pid, pss_kb, proc_name)
+
+        # Form 1: summary section lines like "   12345 kB: com.example.app (pid 6789)"
+        for line in output.splitlines():
+            # "      12345 kB: com.android.systemui (pid 1234)"
+            m = re.match(r"\s*(\d+)\s+kB:\s+(.+?)\s+\(pid\s+(\d+)\)", line)
+            if m:
+                pss_kb = m.group(1)
+                proc   = m.group(2).strip()
+                pid    = m.group(3)
+                rows.append((pid, pss_kb, proc))
+                continue
+            # Form 2: "** MEMINFO in pid 1234 [com.example.app] **"
+            # followed later by "TOTAL PSS:  12345"
+            # We handle this in the second pass below
+
+        # Form 2 fallback: scan for "** MEMINFO in pid NNN [name] **" blocks
+        if not rows:
+            current_pid = ""
+            current_proc = ""
+            for line in output.splitlines():
+                mm = re.match(r"\*+\s*MEMINFO in pid\s+(\d+)\s+\[(.+?)\]", line, re.IGNORECASE)
+                if mm:
+                    current_pid  = mm.group(1)
+                    current_proc = mm.group(2).strip()
+                    continue
+                if current_pid:
+                    # "TOTAL PSS:   1234  TOTAL RSS:  5678  TOTAL SWAP ..."
+                    tm = re.search(r"TOTAL\s+PSS\s*:\s*(\d+)", line, re.IGNORECASE)
+                    if tm:
+                        rows.append((current_pid, tm.group(1), current_proc))
+                        current_pid = ""
+                        current_proc = ""
+
+        # Sort by PSS descending
+        try:
+            rows.sort(key=lambda x: int(x[1]), reverse=True)
+        except Exception:
+            pass
+
+        for pid, pss_kb, proc in rows:
+            ri = self._procrank_table.rowCount()
+            self._procrank_table.insertRow(ri)
+            values = [pid, pss_kb, "", pss_kb, "", "", proc]
+            for ci, val in enumerate(values):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignCenter if ci < 6
+                    else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                self._procrank_table.setItem(ri, ci, item)
+
+        count = self._procrank_table.rowCount()
+        self._procrank_summary_lbl.setText(
+            f"(fallback: dumpsys meminfo — {count} processes — install 'procrank' for Vss/Rss/Uss/Swap)"
+            if count else "(dumpsys meminfo returned no process data)"
+        )
 
     def _refresh_metrics(self):
         if not self._serial:
@@ -1345,5 +1639,71 @@ class DeviceInfoWidget(QWidget):
                 "QPushButton:hover { background-color: #2e7d32; }"
             )
 
+    # ── Real-time top process table ───────────────────────────────────────
+
+    def _start_top_worker(self):
+        """Start (or restart) the background top-polling thread."""
+        self._stop_top_worker()
+        if not self._serial:
+            return
+        w = self._TopWorker(self._serial, interval=2)
+        w.header_ready.connect(self._on_top_header)
+        w.rows_ready.connect(self._on_top_rows)
+        self._top_worker = w
+        w.start()
+
+    def _stop_top_worker(self):
+        if self._top_worker and self._top_worker.isRunning():
+            self._top_worker.stop()
+        self._top_worker = None
+
+    def _on_top_header(self, header: str):
+        """Update the summary label above the top table."""
+        self._top_header_lbl.setText(header)
+
+    def _on_top_rows(self, rows: list):
+        """Repopulate the top process table without flicker."""
+        tbl = self._top_table
+        tbl.setUpdatesEnabled(False)
+        tbl.setRowCount(0)
+
+        _CPU_HIGH   = QColor("#ffebee")   # light red  — high cpu
+        _CPU_MED    = QColor("#fff8e1")   # light amber — medium cpu
+
+        for row in rows:
+            ri = tbl.rowCount()
+            tbl.insertRow(ri)
+            values = [
+                row.get("pid",  ""),
+                row.get("user", ""),
+                row.get("pr",   ""),
+                row.get("ni",   ""),
+                row.get("virt", ""),
+                row.get("res",  ""),
+                row.get("shr",  ""),
+                row.get("s",    ""),
+                row.get("cpu",  ""),
+                row.get("mem",  ""),
+                row.get("args", "") or row.get("time", ""),
+            ]
+            try:
+                cpu_val = float(row.get("cpu", 0))
+            except ValueError:
+                cpu_val = 0.0
+
+            for ci, val in enumerate(values):
+                item = QTableWidgetItem(str(val))
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignCenter if ci < 10
+                    else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                # Colour rows by CPU usage
+                if cpu_val >= 5.0:
+                    item.setBackground(_CPU_HIGH)
+                elif cpu_val >= 1.0:
+                    item.setBackground(_CPU_MED)
+                tbl.setItem(ri, ci, item)
+
+        tbl.setUpdatesEnabled(True)
 
 

@@ -317,8 +317,8 @@ class AdsTableWidget(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Model', 'Proxy Type', 'Host:Port', 'Preview'])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(['No', 'Device Name', 'Serial', 'Proxy Type', 'Host:Port', 'Preview'])
         self.table.verticalHeader().hide()
         hh = self.table.horizontalHeader()
         hh.setStretchLastSection(False)
@@ -326,10 +326,9 @@ class AdsTableWidget(QWidget):
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)           # No
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)         # Device Name – takes remaining space
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Serial
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Model
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # Proxy Type
-        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # Host:Port
-        hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)           # Actions
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Proxy Type
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # Host:Port
+        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)           # Actions
         self.table.itemChanged.connect(self.on_table_item_changed)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.mousePressEvent = self.table_mouse_press_event
@@ -853,7 +852,7 @@ class AdsTableWidget(QWidget):
 
             self.table.blockSignals(True)
             self.table.setRowCount(num_rows)
-            self.table.setColumnCount(7)
+            self.table.setColumnCount(6)
 
             non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
             editable = non_editable | Qt.ItemFlag.ItemIsEditable
@@ -877,12 +876,8 @@ class AdsTableWidget(QWidget):
                 serial_item.setFlags(non_editable)
                 self.table.setItem(row_idx, 2, serial_item)
 
-                model_item = QTableWidgetItem(model)
-                model_item.setFlags(non_editable)
-                self.table.setItem(row_idx, 3, model_item)
-
                 # Proxy cols — placeholder until updated externally
-                for col in (4, 5):
+                for col in (3, 4):
                     ph = QTableWidgetItem("—")
                     ph.setFlags(non_editable)
                     ph.setForeground(Qt.GlobalColor.gray)
@@ -906,10 +901,10 @@ class AdsTableWidget(QWidget):
                 ph_layout.addWidget(open_btn)
                 ph_layout.addWidget(close_btn)
                 ph_layout.addStretch()
-                self.table.setCellWidget(row_idx, 6, preview_widget)
+                self.table.setCellWidget(row_idx, 5, preview_widget)
 
             self.table.setColumnWidth(0, 36)   # No
-            self.table.setColumnWidth(6, 140)  # Actions (Preview + Close buttons)
+            self.table.setColumnWidth(5, 140)  # Actions (Preview + Close buttons)
             self.table.blockSignals(False)
 
             self.status_update.emit(f'Loaded {len(rows)} rows from CSV')
@@ -995,9 +990,8 @@ class AdsTableWidget(QWidget):
             for row_idx in range(self.table.rowCount()):
                 device_name = self.table.item(row_idx, 1)
                 serial = self.table.item(row_idx, 2)
-                model = self.table.item(row_idx, 3)
                 rows.append([
-                    model.text() if model else "",
+                    "",  # model column kept empty for CSV compatibility
                     serial.text() if serial else "",
                     device_name.text() if device_name else "",
                 ])
@@ -1027,7 +1021,7 @@ class AdsTableWidget(QWidget):
         for row in range(self.table.rowCount()):
             serial_item = self.table.item(row, 2)
             if serial_item and serial_item.text().strip() == serial:
-                cell_w = self.table.cellWidget(row, 6)
+                cell_w = self.table.cellWidget(row, 5)
                 if cell_w:
                     btns = cell_w.findChildren(QPushButton)
                     if len(btns) >= 1:
@@ -1042,7 +1036,7 @@ class AdsTableWidget(QWidget):
                 break
 
     def update_proxy_statuses(self, proxy_data: dict):
-        """Update proxy status columns (4, 5) keyed by serial.
+        """Update proxy status columns (3, 4) keyed by serial.
         proxy_data = { serial: {"type": str, "host_port": str} }
         """
         non_editable = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
@@ -1066,8 +1060,8 @@ class AdsTableWidget(QWidget):
                 t_item.setForeground(Qt.GlobalColor.gray)
                 h_item.setForeground(Qt.GlobalColor.gray)
 
-            self.table.setItem(row_idx, 4, t_item)
-            self.table.setItem(row_idx, 5, h_item)
+            self.table.setItem(row_idx, 3, t_item)
+            self.table.setItem(row_idx, 4, h_item)
         self.table.blockSignals(False)
 
     def get_table_data(self):
