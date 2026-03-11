@@ -3,14 +3,17 @@ from __future__ import annotations
 import subprocess
 import os
 import time
+import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox,
     QCheckBox, QScrollArea, QFrame, QSpinBox,
     QListWidget, QRadioButton, QComboBox,
+    QDialog, QApplication,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QPixmap
 
 _si = subprocess.STARTUPINFO()
 _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -303,6 +306,158 @@ class _AutoClickWorker(QThread):
         self.finished.emit(f"✅ Auto click done — {total} taps total")
 
 
+# ── Screenshot worker ─────────────────────────────────────────────────────────
+class _ScreenshotWorker(QThread):
+    """Take a screenshot from an Android device.
+
+    mode:
+      'device'  – screencap saved on device at remote_path, then pulled to save_dir
+      'direct'  – exec-out screencap piped directly to PC (no file left on device)
+    """
+    finished = Signal(str, str)  # (status_msg, local_path_or_empty)
+    error    = Signal(str)
+
+    def __init__(self, serial: str, mode: str, save_dir: str, remote_path: str = "/sdcard/screen_tmp.png"):
+        super().__init__()
+        self.serial      = serial
+        self.mode        = mode        # 'device' | 'direct'
+        self.save_dir    = save_dir
+        self.remote_path = remote_path
+
+    def run(self):
+        ts    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"screenshot_{ts}.png"
+        local = os.path.join(self.save_dir, fname)
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            if self.mode == "device":
+                # 1) take screenshot on device
+                r = subprocess.run(
+                    ["adb", "-s", self.serial, "shell", "screencap", self.remote_path],
+                    startupinfo=_si, capture_output=True, timeout=15,
+                )
+                if r.returncode != 0:
+                    self.error.emit(f"screencap failed: {r.stderr.decode(errors='replace').strip()}")
+                    return
+                # 2) pull to PC
+                r2 = subprocess.run(
+                    ["adb", "-s", self.serial, "pull", self.remote_path, local],
+                    startupinfo=_si, capture_output=True, timeout=15,
+                )
+                if r2.returncode != 0:
+                    self.error.emit(f"pull failed: {r2.stderr.decode(errors='replace').strip()}")
+                    return
+                self.finished.emit(f"✅ Screenshot saved (device + PC): {fname}", local)
+
+            elif self.mode == "direct":
+                # exec-out — piped directly, no file on device
+                proc = subprocess.Popen(
+                    ["adb", "-s", self.serial, "exec-out", "screencap", "-p"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    startupinfo=_si,
+                )
+                data, err = proc.communicate(timeout=20)
+                if proc.returncode != 0 or not data:
+                    self.error.emit(f"exec-out failed: {err.decode(errors='replace').strip()}")
+                    return
+                with open(local, "wb") as f:
+                    f.write(data)
+                self.finished.emit(f"✅ Screenshot (direct to PC): {fname}", local)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── Screen record worker ──────────────────────────────────────────────────────
+class _ScreenRecordWorker(QThread):
+    """Run adb shell screenrecord in a background thread.
+
+    Signals:
+      started(remote_path)  – recording has begun
+      finished(local_path)  – recording stopped and file pulled to PC
+      error(msg)
+    """
+    started  = Signal(str)   # remote path on device
+    finished = Signal(str)   # local path on PC
+    error    = Signal(str)
+
+    def __init__(self, serial: str, remote_path: str, save_dir: str,
+                 time_limit: int = 0, audio: bool = False):
+        super().__init__()
+        self.serial      = serial
+        self.remote_path = remote_path   # e.g. /sdcard/rec_20260311_123456.mp4
+        self.save_dir    = save_dir
+        self.time_limit  = time_limit    # 0 = no explicit --time-limit flag
+        self.audio       = audio
+        self._proc: subprocess.Popen | None = None
+        self._local_path = ""
+
+    # ── public control ────────────────────────────────────────────────────
+    def stop(self):
+        """Gracefully stop screenrecord by sending Ctrl-C (SIGINT)."""
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.send_signal(__import__("signal").SIGTERM)
+        except Exception:
+            try:
+                if self._proc:
+                    self._proc.terminate()
+            except Exception:
+                pass
+
+    def pause(self):
+        """SIGSTOP the screenrecord process (best-effort; not all devices support it)."""
+        try:
+            import signal as _s
+            if self._proc and self._proc.poll() is None:
+                self._proc.send_signal(_s.SIGSTOP)
+        except Exception:
+            pass
+
+    def resume(self):
+        """SIGCONT to resume a paused screenrecord process."""
+        try:
+            import signal as _s
+            if self._proc and self._proc.poll() is None:
+                self._proc.send_signal(_s.SIGCONT)
+        except Exception:
+            pass
+
+    # ── thread body ───────────────────────────────────────────────────────
+    def run(self):
+        ts    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"recording_{ts}.mp4"
+        local = os.path.join(self.save_dir, fname)
+        self._local_path = local
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            cmd = ["adb", "-s", self.serial, "shell", "screenrecord"]
+            if self.time_limit and self.time_limit > 0:
+                cmd += ["--time-limit", str(self.time_limit)]
+            if self.audio:
+                cmd += ["--audio"]     # Android 10+ only
+            cmd.append(self.remote_path)
+
+            self._proc = subprocess.Popen(
+                cmd, startupinfo=_si,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.started.emit(self.remote_path)
+            self._proc.wait()   # blocks until stop() is called or time-limit reached
+
+            # Pull the recorded file to PC
+            r = subprocess.run(
+                ["adb", "-s", self.serial, "pull", self.remote_path, local],
+                startupinfo=_si, capture_output=True, timeout=60,
+            )
+            if r.returncode == 0 and os.path.isfile(local):
+                self.finished.emit(local)
+            else:
+                self.error.emit(f"Pull failed: {r.stderr.decode(errors='replace').strip()}")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ActionsWidget(QWidget):
     status_update = Signal(str)
     hunt_mode_active = Signal(bool)   # True when waiting for a tap coordinate
@@ -313,6 +468,14 @@ class ActionsWidget(QWidget):
         self._workers: list[QThread] = []
         self._auto_click_worker: _AutoClickWorker | None = None
         self._hunt_active: bool = False
+        self._screenshot_paths: list[str] = []
+        self._screenshot_save_dir: str = os.path.join(os.path.expanduser("~"), "Pictures", "fatan_screenshots")
+        # Screen recording state
+        self._rec_worker: _ScreenRecordWorker | None = None
+        self._rec_paused: bool = False
+        self._rec_save_dir: str = os.path.join(os.path.expanduser("~"), "Videos", "fatan_recordings")
+        self._rec_elapsed_timer: QTimer | None = None
+        self._rec_elapsed_secs: int = 0
         self._build_ui()
 
     def set_device(self, serial: str):
@@ -320,7 +483,8 @@ class ActionsWidget(QWidget):
         label = f"Device: {serial}" if serial else "No device selected"
         self._device_label.setText(label)
         enabled = bool(serial)
-        for btn in (self._open_url_btn, self._login_gmail_btn):
+        for btn in (self._open_url_btn, self._login_gmail_btn,
+                    self._ss_take_btn, self._rec_start_btn):
             btn.setEnabled(enabled)
         self._start_click_btn.setEnabled(enabled and self._coord_list.count() > 0)
     def _build_ui(self):
@@ -649,6 +813,220 @@ class ActionsWidget(QWidget):
         click_group.setLayout(click_hl)
         ivl.addWidget(click_group)
 
+        # ── Screenshot group ──────────────────────────────────────────────
+        ss_group = QGroupBox("📸 Screenshot")
+        ss_group.setStyleSheet(_GROUP_SS)
+        ss_vl = QVBoxLayout()
+        ss_vl.setContentsMargins(12, 10, 12, 10)
+        ss_vl.setSpacing(6)
+
+        # Option row: radio buttons to choose mode
+        ss_opt_row = QHBoxLayout()
+        ss_opt_row.setSpacing(12)
+        ss_mode_lbl = QLabel("Mode:")
+        ss_mode_lbl.setStyleSheet(_LABEL_SS)
+        ss_opt_row.addWidget(ss_mode_lbl)
+        self._ss_rb_device = QRadioButton("💾 Save on Device + PC")
+        self._ss_rb_device.setStyleSheet(_CB_SS)
+        self._ss_rb_device.setToolTip(
+            "adb shell screencap /sdcard/screen_tmp.png  →  adb pull\n"
+            "File is saved on device AND downloaded to PC."
+        )
+        self._ss_rb_device.setChecked(True)
+        ss_opt_row.addWidget(self._ss_rb_device)
+        self._ss_rb_direct = QRadioButton("📥 Direct to PC only")
+        self._ss_rb_direct.setStyleSheet(_CB_SS)
+        self._ss_rb_direct.setToolTip(
+            "adb exec-out screencap -p  (nothing left on device)\n"
+            "Pipes screenshot bytes straight to PC."
+        )
+        ss_opt_row.addWidget(self._ss_rb_direct)
+        ss_opt_row.addStretch()
+        ss_vl.addLayout(ss_opt_row)
+
+        # Action row: Take button + open folder
+        ss_action_row = QHBoxLayout()
+        ss_action_row.setSpacing(6)
+        self._ss_take_btn = QPushButton("📸 Take Screenshot")
+        self._ss_take_btn.setStyleSheet(_BTN_PRIMARY_SS)
+        self._ss_take_btn.setEnabled(False)
+        self._ss_take_btn.clicked.connect(self._take_screenshot_ui)
+        ss_action_row.addWidget(self._ss_take_btn)
+        ss_folder_btn = QPushButton("📂 Open Folder")
+        ss_folder_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        ss_folder_btn.clicked.connect(self._open_ss_folder)
+        ss_action_row.addWidget(ss_folder_btn)
+        ss_action_row.addStretch()
+        ss_vl.addLayout(ss_action_row)
+
+        # List of captured screenshots
+        ss_list_lbl = QLabel("Captured (double-click to preview):")
+        ss_list_lbl.setStyleSheet(_LABEL_SS)
+        ss_vl.addWidget(ss_list_lbl)
+
+        self._ss_list = QListWidget()
+        self._ss_list.setStyleSheet(
+            "QListWidget { border: 1px solid #dce3f0; border-radius: 4px;"
+            " background: #fff; font-size: 11px; }"
+            "QListWidget::item:selected { background: #bbdefb; color: #000; }"
+        )
+        self._ss_list.setFixedHeight(90)
+        self._ss_list.itemDoubleClicked.connect(self._on_ss_list_double_click)
+        ss_vl.addWidget(self._ss_list)
+
+        # List action buttons
+        ss_list_btn_row = QHBoxLayout()
+        ss_list_btn_row.setSpacing(4)
+        ss_preview_btn = QPushButton("👁 Preview")
+        ss_preview_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        ss_preview_btn.clicked.connect(self._preview_selected_screenshot)
+        ss_list_btn_row.addWidget(ss_preview_btn)
+        ss_del_btn = QPushButton("🗑 Delete")
+        ss_del_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #ef9a9a; border-radius: 4px;"
+            " padding: 4px 10px; background: #ffebee; font-size: 11px; }"
+            "QPushButton:hover { background: #ffcdd2; }"
+        )
+        ss_del_btn.clicked.connect(self._delete_selected_screenshot)
+        ss_list_btn_row.addWidget(ss_del_btn)
+        ss_list_btn_row.addStretch()
+        ss_vl.addLayout(ss_list_btn_row)
+
+        ss_group.setLayout(ss_vl)
+        ivl.addWidget(ss_group)
+
+        # ── Screen Recording group ────────────────────────────────────────
+        rec_group = QGroupBox("🎬 Screen Recording")
+        rec_group.setStyleSheet(_GROUP_SS)
+        rec_vl = QVBoxLayout()
+        rec_vl.setContentsMargins(12, 10, 12, 10)
+        rec_vl.setSpacing(6)
+
+        # Options row 1: time limit + audio
+        rec_opt1 = QHBoxLayout()
+        rec_opt1.setSpacing(10)
+
+        lbl_timelimit = QLabel("Time limit (s):")
+        lbl_timelimit.setStyleSheet(_LABEL_SS)
+        rec_opt1.addWidget(lbl_timelimit)
+        self._rec_timelimit = QSpinBox()
+        self._rec_timelimit.setRange(0, 1800)
+        self._rec_timelimit.setValue(180)
+        self._rec_timelimit.setSpecialValueText("∞ No limit")
+        self._rec_timelimit.setSuffix(" s")
+        self._rec_timelimit.setFixedWidth(90)
+        self._rec_timelimit.setStyleSheet(_SPINBOX_SS)
+        self._rec_timelimit.setToolTip("0 = no limit (up to 3 min Android default)")
+        rec_opt1.addWidget(self._rec_timelimit)
+
+        lbl_delay = QLabel("Start delay (s):")
+        lbl_delay.setStyleSheet(_LABEL_SS)
+        rec_opt1.addWidget(lbl_delay)
+        self._rec_delay = QSpinBox()
+        self._rec_delay.setRange(0, 30)
+        self._rec_delay.setValue(0)
+        self._rec_delay.setSuffix(" s")
+        self._rec_delay.setFixedWidth(65)
+        self._rec_delay.setStyleSheet(_SPINBOX_SS)
+        self._rec_delay.setToolTip("Wait N seconds before starting to record")
+        rec_opt1.addWidget(self._rec_delay)
+
+        self._rec_audio_cb = QCheckBox("🔊 With audio")
+        self._rec_audio_cb.setStyleSheet(_CB_SS)
+        self._rec_audio_cb.setToolTip("Include device audio (requires Android 10+, --audio flag)")
+        rec_opt1.addWidget(self._rec_audio_cb)
+
+        rec_opt1.addStretch()
+        rec_vl.addLayout(rec_opt1)
+
+        # Control buttons row: Start / Pause / Stop + screenshot-while-recording
+        rec_ctrl_row = QHBoxLayout()
+        rec_ctrl_row.setSpacing(6)
+
+        self._rec_start_btn = QPushButton("▶ Start Recording")
+        self._rec_start_btn.setStyleSheet(_BTN_PRIMARY_SS)
+        self._rec_start_btn.setEnabled(False)
+        self._rec_start_btn.clicked.connect(self._start_recording)
+        rec_ctrl_row.addWidget(self._rec_start_btn)
+
+        self._rec_pause_btn = QPushButton("⏸ Pause")
+        self._rec_pause_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        self._rec_pause_btn.setEnabled(False)
+        self._rec_pause_btn.setToolTip("Send SIGSTOP to pause / SIGCONT to resume")
+        self._rec_pause_btn.clicked.connect(self._pause_resume_recording)
+        rec_ctrl_row.addWidget(self._rec_pause_btn)
+
+        self._rec_stop_btn = QPushButton("■ Stop")
+        self._rec_stop_btn.setStyleSheet(
+            "QPushButton { background:#e53935; color:white; font-weight:bold;"
+            " padding:5px 14px; border-radius:4px; font-size:11px; }"
+            "QPushButton:hover { background:#c62828; }"
+            "QPushButton:disabled { background:#ef9a9a; }"
+        )
+        self._rec_stop_btn.setEnabled(False)
+        self._rec_stop_btn.clicked.connect(self._stop_recording)
+        rec_ctrl_row.addWidget(self._rec_stop_btn)
+
+        self._rec_snap_btn = QPushButton("📸 Snapshot")
+        self._rec_snap_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        self._rec_snap_btn.setEnabled(False)
+        self._rec_snap_btn.setToolTip("Take a screenshot while recording is active")
+        self._rec_snap_btn.clicked.connect(lambda: self._take_screenshot_ui(during_record=True))
+        rec_ctrl_row.addWidget(self._rec_snap_btn)
+
+        rec_ctrl_row.addStretch()
+
+        self._rec_status_lbl = QLabel("Idle")
+        self._rec_status_lbl.setStyleSheet("color:#888; font-size:10px; font-style:italic;")
+        rec_ctrl_row.addWidget(self._rec_status_lbl)
+
+        rec_vl.addLayout(rec_ctrl_row)
+
+        # Elapsed time label
+        self._rec_elapsed_lbl = QLabel("")
+        self._rec_elapsed_lbl.setStyleSheet("color:#1976d2; font-size:10px; font-weight:bold;")
+        rec_vl.addWidget(self._rec_elapsed_lbl)
+
+        # Recorded videos list
+        rec_list_lbl = QLabel("Recorded videos (double-click to play):")
+        rec_list_lbl.setStyleSheet(_LABEL_SS)
+        rec_vl.addWidget(rec_list_lbl)
+
+        self._rec_list = QListWidget()
+        self._rec_list.setStyleSheet(
+            "QListWidget { border: 1px solid #dce3f0; border-radius: 4px;"
+            " background: #fff; font-size: 11px; }"
+            "QListWidget::item:selected { background: #c8e6c9; color: #000; }"
+        )
+        self._rec_list.setFixedHeight(90)
+        self._rec_list.itemDoubleClicked.connect(self._on_rec_list_double_click)
+        rec_vl.addWidget(self._rec_list)
+
+        # List action buttons
+        rec_list_btn_row = QHBoxLayout()
+        rec_list_btn_row.setSpacing(4)
+        rec_play_btn = QPushButton("▶ Play")
+        rec_play_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        rec_play_btn.clicked.connect(self._play_selected_video)
+        rec_list_btn_row.addWidget(rec_play_btn)
+        rec_open_folder_btn = QPushButton("📂 Open Folder")
+        rec_open_folder_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        rec_open_folder_btn.clicked.connect(self._open_rec_folder)
+        rec_list_btn_row.addWidget(rec_open_folder_btn)
+        rec_del_btn = QPushButton("🗑 Delete")
+        rec_del_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #ef9a9a; border-radius: 4px;"
+            " padding: 4px 10px; background: #ffebee; font-size: 11px; }"
+            "QPushButton:hover { background: #ffcdd2; }"
+        )
+        rec_del_btn.clicked.connect(self._delete_selected_video)
+        rec_list_btn_row.addWidget(rec_del_btn)
+        rec_list_btn_row.addStretch()
+        rec_vl.addLayout(rec_list_btn_row)
+
+        rec_group.setLayout(rec_vl)
+        ivl.addWidget(rec_group)
+
         ivl.addStretch()
 
         scroll.setWidget(inner)
@@ -845,3 +1223,256 @@ class ActionsWidget(QWidget):
         if self._auto_click_worker:
             self._auto_click_worker.stop()
         self._stop_click_btn.setEnabled(False)
+
+    # ── Screenshot handlers ───────────────────────────────────────────────────
+
+    def _take_screenshot_ui(self, during_record: bool = False):
+        """Take a screenshot using the selected mode."""
+        if not self._serial:
+            return
+        mode = "device" if self._ss_rb_device.isChecked() else "direct"
+        self._take_screenshot(mode)
+
+    def _take_screenshot(self, mode: str):
+        if not self._serial:
+            return
+        w = _ScreenshotWorker(self._serial, mode, self._screenshot_save_dir)
+        w.finished.connect(self._on_screenshot_done)
+        w.error.connect(lambda e: self.status_update.emit(f"❌ Screenshot error: {e}"))
+        w.finished.connect(lambda _msg, _p, ww=w: self._workers.remove(ww) if ww in self._workers else None)
+        self._workers.append(w)
+        w.start()
+        self.status_update.emit("📸 Taking screenshot…")
+
+    def _on_screenshot_done(self, msg: str, local_path: str):
+        self.status_update.emit(msg)
+        if local_path and os.path.isfile(local_path):
+            self._screenshot_paths.append(local_path)
+            fname = os.path.basename(local_path)
+            item_text = f"📷 {fname}"
+            self._ss_list.addItem(item_text)
+            # Store path in item data
+            self._ss_list.item(self._ss_list.count() - 1).setData(Qt.ItemDataRole.UserRole, local_path)
+            self._ss_list.scrollToBottom()
+
+    def _on_ss_list_double_click(self, item):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self._preview_screenshot(path)
+
+    def _preview_selected_screenshot(self):
+        item = self._ss_list.currentItem()
+        if not item:
+            self.status_update.emit("⚠ Select a screenshot first")
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self._preview_screenshot(path)
+
+    def _delete_selected_screenshot(self):
+        row = self._ss_list.currentRow()
+        if row < 0:
+            self.status_update.emit("⚠ Select a screenshot to delete")
+            return
+        item = self._ss_list.item(row)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+            if path in self._screenshot_paths:
+                self._screenshot_paths.remove(path)
+        except Exception as e:
+            self.status_update.emit(f"❌ Delete failed: {e}")
+            return
+        self._ss_list.takeItem(row)
+        self.status_update.emit(f"🗑 Deleted: {os.path.basename(path)}")
+
+    def _preview_screenshot(self, path: str):
+        """Open a dialog showing a full-size preview of the screenshot."""
+        if not os.path.isfile(path):
+            self.status_update.emit("❌ File not found")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Preview — {os.path.basename(path)}")
+        dlg.setMinimumSize(400, 600)
+        vl = QVBoxLayout(dlg)
+        vl.setContentsMargins(8, 8, 8, 8)
+
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        px = QPixmap(path)
+        if not px.isNull():
+            screen = QApplication.primaryScreen().availableGeometry()
+            max_w = int(screen.width() * 0.6)
+            max_h = int(screen.height() * 0.8)
+            lbl.setPixmap(px.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+        else:
+            lbl.setText("Cannot load image")
+        vl.addWidget(lbl)
+
+        btn_row = QHBoxLayout()
+        open_btn = QPushButton("📂 Open in Explorer")
+        open_btn.clicked.connect(lambda: os.startfile(os.path.dirname(path)))
+        btn_row.addWidget(open_btn)
+        close_btn = QPushButton("✖ Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        vl.addLayout(btn_row)
+
+        dlg.exec()
+
+    def _open_ss_folder(self):
+        os.makedirs(self._screenshot_save_dir, exist_ok=True)
+        try:
+            os.startfile(self._screenshot_save_dir)
+        except Exception as e:
+            self.status_update.emit(f"❌ Cannot open folder: {e}")
+
+    # ── Screen recording handlers ─────────────────────────────────────────────
+
+    def _start_recording(self):
+        if not self._serial:
+            return
+        delay = self._rec_delay.value()
+        if delay > 0:
+            self._rec_status_lbl.setText(f"⏳ Starting in {delay}s…")
+            self._rec_start_btn.setEnabled(False)
+            QTimer.singleShot(delay * 1000, self._do_start_recording)
+        else:
+            self._do_start_recording()
+
+    def _do_start_recording(self):
+        if not self._serial:
+            return
+        ts          = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        remote_path = f"/sdcard/rec_{ts}.mp4"
+        time_limit  = self._rec_timelimit.value()   # 0 = no limit
+        audio       = self._rec_audio_cb.isChecked()
+
+        self._rec_paused = False
+        self._rec_elapsed_secs = 0
+        self._rec_elapsed_lbl.setText("⏺ 00:00")
+
+        self._rec_worker = _ScreenRecordWorker(
+            self._serial, remote_path, self._rec_save_dir, time_limit, audio
+        )
+        self._rec_worker.started.connect(self._on_rec_started)
+        self._rec_worker.finished.connect(self._on_rec_finished)
+        self._rec_worker.error.connect(lambda e: self.status_update.emit(f"❌ Record error: {e}"))
+        self._rec_worker.finished.connect(self._on_rec_worker_done)
+        self._rec_worker.start()
+
+        # Elapsed timer
+        self._rec_elapsed_timer = QTimer(self)
+        self._rec_elapsed_timer.setInterval(1000)
+        self._rec_elapsed_timer.timeout.connect(self._tick_elapsed)
+        self._rec_elapsed_timer.start()
+
+    def _on_rec_started(self, remote_path: str):
+        self._rec_start_btn.setEnabled(False)
+        self._rec_pause_btn.setEnabled(True)
+        self._rec_stop_btn.setEnabled(True)
+        self._rec_snap_btn.setEnabled(True)
+        self._rec_status_lbl.setText("⏺ Recording…")
+        self.status_update.emit(f"🎬 Recording started: {remote_path}")
+
+    def _on_rec_finished(self, local_path: str):
+        fname = os.path.basename(local_path)
+        self.status_update.emit(f"✅ Video saved: {fname}")
+
+    def _on_rec_worker_done(self, local_path: str):
+        self._stop_elapsed_timer()
+        self._rec_start_btn.setEnabled(bool(self._serial))
+        self._rec_pause_btn.setEnabled(False)
+        self._rec_pause_btn.setText("⏸ Pause")
+        self._rec_stop_btn.setEnabled(False)
+        self._rec_snap_btn.setEnabled(False)
+        self._rec_status_lbl.setText("Idle")
+        self._rec_elapsed_lbl.setText("")
+        self._rec_paused = False
+        if local_path and os.path.isfile(local_path):
+            item_text = f"🎬 {os.path.basename(local_path)}"
+            self._rec_list.addItem(item_text)
+            self._rec_list.item(self._rec_list.count() - 1).setData(Qt.ItemDataRole.UserRole, local_path)
+            self._rec_list.scrollToBottom()
+
+    def _pause_resume_recording(self):
+        if not self._rec_worker:
+            return
+        if self._rec_paused:
+            self._rec_worker.resume()
+            self._rec_paused = False
+            self._rec_pause_btn.setText("⏸ Pause")
+            self._rec_status_lbl.setText("⏺ Recording…")
+            if self._rec_elapsed_timer:
+                self._rec_elapsed_timer.start()
+        else:
+            self._rec_worker.pause()
+            self._rec_paused = True
+            self._rec_pause_btn.setText("▶ Resume")
+            self._rec_status_lbl.setText("⏸ Paused")
+            if self._rec_elapsed_timer:
+                self._rec_elapsed_timer.stop()
+
+    def _stop_recording(self):
+        if self._rec_worker:
+            self._rec_worker.stop()
+        self._rec_status_lbl.setText("⏹ Stopping…")
+        self._rec_stop_btn.setEnabled(False)
+        self._rec_pause_btn.setEnabled(False)
+
+    def _tick_elapsed(self):
+        self._rec_elapsed_secs += 1
+        m, s = divmod(self._rec_elapsed_secs, 60)
+        self._rec_elapsed_lbl.setText(f"⏺ {m:02d}:{s:02d}")
+
+    def _stop_elapsed_timer(self):
+        if self._rec_elapsed_timer:
+            self._rec_elapsed_timer.stop()
+            self._rec_elapsed_timer.deleteLater()
+            self._rec_elapsed_timer = None
+
+    def _on_rec_list_double_click(self, item):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and os.path.isfile(path):
+            self._play_video(path)
+
+    def _play_selected_video(self):
+        item = self._rec_list.currentItem()
+        if not item:
+            self.status_update.emit("⚠ Select a video first")
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self._play_video(path)
+
+    def _play_video(self, path: str):
+        try:
+            os.startfile(path)
+        except Exception as e:
+            self.status_update.emit(f"❌ Cannot open video: {e}")
+
+    def _delete_selected_video(self):
+        row = self._rec_list.currentRow()
+        if row < 0:
+            self.status_update.emit("⚠ Select a video to delete")
+            return
+        item = self._rec_list.item(row)
+        path = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except Exception as e:
+            self.status_update.emit(f"❌ Delete failed: {e}")
+            return
+        self._rec_list.takeItem(row)
+        self.status_update.emit(f"🗑 Deleted: {os.path.basename(path)}")
+
+    def _open_rec_folder(self):
+        os.makedirs(self._rec_save_dir, exist_ok=True)
+        try:
+            os.startfile(self._rec_save_dir)
+        except Exception as e:
+            self.status_update.emit(f"❌ Cannot open folder: {e}")
+

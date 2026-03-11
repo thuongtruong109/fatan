@@ -342,6 +342,18 @@ class CookieLoaderGUI(QWidget):
         )
         pv_layout.addWidget(self._preview_title)
 
+        # Rotate button row
+        self._rotation_state = 0  # 0 = portrait, 1 = landscape
+        self._rotate_btn = QPushButton("🔄 Rotate")
+        self._rotate_btn.setToolTip("Toggle screen rotation (portrait ↔ landscape)")
+        self._rotate_btn.setStyleSheet(
+            "QPushButton { background-color: #455a64; color: white; font-weight: bold;"
+            " padding: 4px 10px; border-radius: 4px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #37474f; }"
+        )
+        self._rotate_btn.clicked.connect(self._toggle_rotation)
+        pv_layout.addWidget(self._rotate_btn)
+
         # Placeholder container — used only to measure position for the overlay window
         self.preview_container = QWidget()
         self.preview_container.setMinimumSize(300, 500)
@@ -1217,6 +1229,8 @@ class CookieLoaderGUI(QWidget):
         closed_serial = self._current_preview_serial
         self._scrcpy_proc = None
         self._current_preview_serial = None
+        self._rotation_state = 0
+        self._rotate_btn.setText("🔄 Rotate")
 
         # Re-enable the Preview button for the closed device
         if closed_serial:
@@ -1237,6 +1251,25 @@ class CookieLoaderGUI(QWidget):
             self._preview_overlay.setGeometry(self.preview_container.rect())
             self._preview_overlay.raise_()
         return super().eventFilter(obj, event)
+
+    def _toggle_rotation(self):
+        """Toggle screen rotation between portrait (0) and landscape (1)."""
+        if not self._current_preview_serial:
+            self.update_status("⚠ No device in preview to rotate")
+            return
+        self._rotation_state = 1 - self._rotation_state
+        label = "landscape 🌄" if self._rotation_state == 1 else "portrait 📱"
+        try:
+            subprocess.run(
+                ["adb", "-s", self._current_preview_serial, "shell",
+                 "settings", "put", "system", "user_rotation", str(self._rotation_state)],
+                startupinfo=_si, timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._rotate_btn.setText("🔄 Portrait 📱" if self._rotation_state == 0 else "🔄 Landscape 🌄")
+            self.update_status(f"🔄 Rotated to {label}: {self._current_preview_serial}")
+        except Exception as e:
+            self.update_status(f"❌ Rotate failed: {e}")
 
     def _on_hunt_mode_changed(self, active: bool):
         """Show/hide the transparent overlay on the preview container for hunt mode."""

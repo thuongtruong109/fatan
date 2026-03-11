@@ -694,6 +694,8 @@ class ActivitiesWidget(QWidget):
             (_btn_secondary("📦 Package Dump"), ("shell", "dumpsys", "package")),
             (_btn_danger("🔔 Notification"),    ("shell", "dumpsys", "notification")),
             (_btn_outline("🌐 WiFi Dump"),      ("shell", "dumpsys", "wifi")),
+            (_btn_teal("📡 Network Dumps"),     ("shell", "dumpsys", "netstats")),
+            (_btn_success("📍 Location Dumps"), ("shell", "dumpsys", "location")),
         ]
 
         for idx, (btn, cmd) in enumerate(dump_items):
