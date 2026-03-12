@@ -371,6 +371,135 @@ class ProxyWidget(QWidget):
         cfg_group.setLayout(cfg_layout)
         root.addWidget(cfg_group)
 
+        # ── Port Forward / Reverse ────────────────────────────────────────
+        _PORT_GROUP_SS = """
+            QGroupBox {
+                font-weight: bold; font-size: 12px;
+                border: 1px solid #ddd; border-radius: 6px;
+                margin-top: 6px; padding-top: 4px;
+                background-color: #f8f9ff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 10px;
+                padding: 0 4px; color: #1565c0;
+            }
+        """
+        _PORT_INPUT_SS = (
+            "QLineEdit { border: 1px solid #ddd; border-radius: 4px;"
+            " padding: 2px 6px; background: #fff; color: #212121;"
+            " font-size: 11px; min-height: 20px; max-height: 24px; }"
+            "QLineEdit:focus { border: 1px solid #1976d2; }"
+        )
+        _PORT_BTN_SS = (
+            "QPushButton { background-color: #1976d2; color: white; font-weight: bold;"
+            " padding: 4px 12px; border-radius: 4px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #1565c0; }"
+            "QPushButton:disabled { background-color: #90caf9; }"
+        )
+        _PORT_BTN_RM_SS = (
+            "QPushButton { background-color: #e53935; color: white; font-weight: bold;"
+            " padding: 4px 12px; border-radius: 4px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #c62828; }"
+            "QPushButton:disabled { background-color: #ef9a9a; }"
+        )
+        _PORT_LBL_SS = "font-size: 11px; font-weight: bold; color: #555;"
+
+        port_group = QGroupBox("🔀 Port Forward / Reverse")
+        port_group.setStyleSheet(_PORT_GROUP_SS)
+        port_vl = QVBoxLayout()
+        port_vl.setContentsMargins(10, 10, 10, 10)
+        port_vl.setSpacing(10)
+
+        # ── Forward section ───────────────────────────────────────────────
+        fwd_lbl = QLabel("➡ Forward")
+        fwd_lbl.setStyleSheet(_PORT_LBL_SS)
+        port_vl.addWidget(fwd_lbl)
+
+        fwd_row = QHBoxLayout()
+        fwd_row.setSpacing(6)
+
+        fwd_host_lbl = QLabel("Host port:")
+        fwd_host_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        fwd_row.addWidget(fwd_host_lbl)
+        self._fwd_host_port = QLineEdit()
+        self._fwd_host_port.setPlaceholderText("e.g. 8080")
+        self._fwd_host_port.setFixedWidth(90)
+        self._fwd_host_port.setStyleSheet(_PORT_INPUT_SS)
+        fwd_row.addWidget(self._fwd_host_port)
+
+        fwd_dev_lbl = QLabel("Device port:")
+        fwd_dev_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        fwd_row.addWidget(fwd_dev_lbl)
+        self._fwd_dev_port = QLineEdit()
+        self._fwd_dev_port.setPlaceholderText("e.g. 8080")
+        self._fwd_dev_port.setFixedWidth(90)
+        self._fwd_dev_port.setStyleSheet(_PORT_INPUT_SS)
+        fwd_row.addWidget(self._fwd_dev_port)
+
+        fwd_row.addStretch()
+
+        fwd_apply_btn = QPushButton("▶ Forward")
+        fwd_apply_btn.setStyleSheet(_PORT_BTN_SS)
+        fwd_apply_btn.clicked.connect(self._on_forward_apply)
+        fwd_row.addWidget(fwd_apply_btn)
+
+        fwd_rm_btn = QPushButton("✖ Remove All")
+        fwd_rm_btn.setStyleSheet(_PORT_BTN_RM_SS)
+        fwd_rm_btn.setToolTip("Remove all forward port forwards")
+        fwd_rm_btn.clicked.connect(self._on_forward_remove_all)
+        fwd_row.addWidget(fwd_rm_btn)
+
+        port_vl.addLayout(fwd_row)
+
+        # ── Reverse section ───────────────────────────────────────────────
+        rev_lbl = QLabel("⬅ Reverse")
+        rev_lbl.setStyleSheet(_PORT_LBL_SS)
+        port_vl.addWidget(rev_lbl)
+
+        rev_row = QHBoxLayout()
+        rev_row.setSpacing(6)
+
+        rev_dev_lbl = QLabel("Device port:")
+        rev_dev_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        rev_row.addWidget(rev_dev_lbl)
+        self._rev_dev_port = QLineEdit()
+        self._rev_dev_port.setPlaceholderText("e.g. 3000")
+        self._rev_dev_port.setFixedWidth(90)
+        self._rev_dev_port.setStyleSheet(_PORT_INPUT_SS)
+        rev_row.addWidget(self._rev_dev_port)
+
+        rev_host_lbl = QLabel("Host port:")
+        rev_host_lbl.setStyleSheet("font-size: 11px; color: #555;")
+        rev_row.addWidget(rev_host_lbl)
+        self._rev_host_port = QLineEdit()
+        self._rev_host_port.setPlaceholderText("e.g. 3000")
+        self._rev_host_port.setFixedWidth(90)
+        self._rev_host_port.setStyleSheet(_PORT_INPUT_SS)
+        rev_row.addWidget(self._rev_host_port)
+
+        rev_row.addStretch()
+
+        rev_apply_btn = QPushButton("▶ Reverse")
+        rev_apply_btn.setStyleSheet(_PORT_BTN_SS)
+        rev_apply_btn.clicked.connect(self._on_reverse_apply)
+        rev_row.addWidget(rev_apply_btn)
+
+        rev_rm_btn = QPushButton("✖ Remove All")
+        rev_rm_btn.setStyleSheet(_PORT_BTN_RM_SS)
+        rev_rm_btn.setToolTip("Remove all reverse port forwards")
+        rev_rm_btn.clicked.connect(self._on_reverse_remove_all)
+        rev_row.addWidget(rev_rm_btn)
+
+        port_vl.addLayout(rev_row)
+
+        # ── Status label ──────────────────────────────────────────────────
+        self._port_status_lbl = QLabel("")
+        self._port_status_lbl.setStyleSheet("font-size: 11px; color: #2e7d32;")
+        port_vl.addWidget(self._port_status_lbl)
+
+        port_group.setLayout(port_vl)
+        root.addWidget(port_group)
+
         # ── Ping / Proxy Test ─────────────────────────────────────────────
         _GROUP_SS = """
             QGroupBox {
@@ -786,3 +915,117 @@ class ProxyWidget(QWidget):
         self._ping_summary_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
         self._ping_summary_lbl.setText(summary)
         self._ping_worker = None
+
+    # ── Port Forward / Reverse handlers ──────────────────────────────────
+    def _set_port_status(self, msg: str, ok: bool = True):
+        color = "#2e7d32" if ok else "#c62828"
+        self._port_status_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._port_status_lbl.setText(msg)
+
+    def _on_forward_apply(self):
+        host_port = self._fwd_host_port.text().strip()
+        dev_port  = self._fwd_dev_port.text().strip()
+        if not host_port or not dev_port:
+            self._set_port_status("⚠️ Enter both host port and device port.", ok=False)
+            return
+        try:
+            int(host_port); int(dev_port)
+        except ValueError:
+            self._set_port_status("⚠️ Ports must be numbers.", ok=False)
+            return
+
+        serials = self._connected_serials()
+        if not serials:
+            self._set_port_status("⚠️ No connected devices found.", ok=False)
+            return
+
+        ok_count = 0
+        for serial in serials:
+            try:
+                r = subprocess.run(
+                    ["adb", "-s", serial, "forward", f"tcp:{host_port}", f"tcp:{dev_port}"],
+                    startupinfo=_si, capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    ok_count += 1
+                else:
+                    self._set_port_status(f"❌ {serial}: {r.stderr.strip()}", ok=False)
+            except Exception as e:
+                self._set_port_status(f"❌ {serial}: {e}", ok=False)
+
+        if ok_count:
+            self._set_port_status(
+                f"✅ Forwarded tcp:{host_port} → tcp:{dev_port} on {ok_count}/{len(serials)} device(s)."
+            )
+
+    def _on_forward_remove_all(self):
+        serials = self._connected_serials()
+        if not serials:
+            self._set_port_status("⚠️ No connected devices found.", ok=False)
+            return
+        ok_count = 0
+        for serial in serials:
+            try:
+                r = subprocess.run(
+                    ["adb", "-s", serial, "forward", "--remove-all"],
+                    startupinfo=_si, capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    ok_count += 1
+            except Exception:
+                pass
+        self._set_port_status(f"🚫 Removed all forwards on {ok_count}/{len(serials)} device(s).")
+
+    def _on_reverse_apply(self):
+        dev_port  = self._rev_dev_port.text().strip()
+        host_port = self._rev_host_port.text().strip()
+        if not dev_port or not host_port:
+            self._set_port_status("⚠️ Enter both device port and host port.", ok=False)
+            return
+        try:
+            int(dev_port); int(host_port)
+        except ValueError:
+            self._set_port_status("⚠️ Ports must be numbers.", ok=False)
+            return
+
+        serials = self._connected_serials()
+        if not serials:
+            self._set_port_status("⚠️ No connected devices found.", ok=False)
+            return
+
+        ok_count = 0
+        for serial in serials:
+            try:
+                r = subprocess.run(
+                    ["adb", "-s", serial, "reverse", f"tcp:{dev_port}", f"tcp:{host_port}"],
+                    startupinfo=_si, capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    ok_count += 1
+                else:
+                    self._set_port_status(f"❌ {serial}: {r.stderr.strip()}", ok=False)
+            except Exception as e:
+                self._set_port_status(f"❌ {serial}: {e}", ok=False)
+
+        if ok_count:
+            self._set_port_status(
+                f"✅ Reversed tcp:{dev_port} → tcp:{host_port} on {ok_count}/{len(serials)} device(s)."
+            )
+
+    def _on_reverse_remove_all(self):
+        serials = self._connected_serials()
+        if not serials:
+            self._set_port_status("⚠️ No connected devices found.", ok=False)
+            return
+        ok_count = 0
+        for serial in serials:
+            try:
+                r = subprocess.run(
+                    ["adb", "-s", serial, "reverse", "--remove-all"],
+                    startupinfo=_si, capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    ok_count += 1
+            except Exception:
+                pass
+        self._set_port_status(f"🚫 Removed all reverses on {ok_count}/{len(serials)} device(s).")

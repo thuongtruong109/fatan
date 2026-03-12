@@ -1,13 +1,4 @@
-## Quay màn hình
-
-```bash
-adb shell screenrecord /sdcard/video.mp4
-```
-
 ## Điều khiển thiết bị từ PC
-
-- mở app
-- gửi phím
 
 Ví dụ:
 
@@ -70,35 +61,6 @@ Sau đó:
 cd /data/data/com.example.app/databases
 ```
 
-# 🌐 13. Port forwarding
-
-ADB có thể forward port:
-
-```bash
-adb forward tcp:8080 tcp:8080
-```
-
-Dùng cho:
-
-- debug web server
-- dev backend
-
-# 🧬 14. Reverse port (ít người biết)
-
-Ngược lại:
-
-```bash
-adb reverse tcp:3000 tcp:3000
-```
-
-👉 Android truy cập server từ PC.
-
-Xem:
-
-- lỗi driver
-- lỗi hardware
-- lỗi kernel
-
 # 💡 Một số thứ **cực nâng cao có thể làm với ADB**
 
 - flash ROM
@@ -153,21 +115,6 @@ Dùng để:
 - test security
 - trigger chức năng ẩn
 
-# 📊 7. Xem toàn bộ service Android
-
-```bash
-adb shell service list
-```
-
-Có thể thấy:
-
-- audio
-- wifi
-- activity
-- package
-
-👉 Đây là **API nội bộ Android**.
-
 # ⚡ 8. Restart System UI
 
 Nếu UI bị lỗi:
@@ -212,12 +159,6 @@ ADB có thể chạy qua WiFi:
 adb tcpip 5555
 adb connect 192.168.1.10
 ```
-
-# 🚀 Tool cực mạnh dùng ADB
-
-adb reboot edl (chế độ Qualcomm cực thấp)
-adb reboot download (Samsung Odin mode)
-adb reboot fastboot (fastbootd trên Android mới)
 
 ### Mirror + control Android
 
@@ -315,8 +256,6 @@ adb shell am restart
 adb shell dumpsys activity activities
 ```
 
----
-
 # 4️⃣ Can thiệp package manager
 
 `pm` có nhiều lệnh hiếm.
@@ -338,8 +277,6 @@ adb shell pm hide com.example.app
 ```bash
 adb shell pm install --instant app.apk
 ```
-
----
 
 # 5️⃣ Điều khiển SurfaceFlinger (graphics engine)
 
@@ -436,9 +373,7 @@ Force unmount:
 adb shell sm unmount
 ```
 
----
-
-# 9️⃣ Manipulate network stack
+# Manipulate network stack
 
 ADB có thể điều khiển network service.
 
@@ -504,7 +439,7 @@ adb shell service call statusbar 1
 
 # 12️⃣ Trigger bugreport system
 
-Android có **bugreport subsystem**.
+Android có **bugreport subsystem**. Dùng trong CI testing.
 
 ```bash
 adb shell bugreport bug.zip
@@ -516,21 +451,11 @@ Hoặc streaming:
 adb bugreport
 ```
 
-Dùng trong CI testing.
-
----
-
-# 13️⃣ Trace system performance
-
-ADB có **system tracing**.
-
-Start trace:
+# Trace system performance
 
 ```bash
 adb shell atrace gfx view sched freq idle am wm
 ```
-
-Hoặc:
 
 ```bash
 adb shell perfetto
@@ -554,11 +479,7 @@ Hoặc:
 adb shell procrank
 ```
 
-Check memory leak.
-
----
-
-# 15️⃣ Override system config runtime
+# 1 Override system config runtime
 
 Android có **device_config**.
 
@@ -576,29 +497,20 @@ Có thể thay đổi behavior runtime.
 
 ---
 
-# ⭐ Một command cực hiếm (system dev hay dùng)
-
-Enable binder transaction log:
+# Enable binder transaction log:
 
 ```bash
 adb shell setprop debug.binder.calls 1
 ```
-
-Sau đó:
 
 ```bash
 adb shell dumpsys binder_calls_stats
 ```
 
 Xem route: adb shell ip route
-
 Xem IP: adb shell ip addr show
-
-adb shell netstat
-
+Xem netstat: adb shell netstat
 Ping server: adb shell ping google.com
-
-Disk usage: adb shell df
 
 ROM modding
 
@@ -609,5 +521,3 @@ adb remount
 Mount system RW
 
 adb shell mount -o rw,remount /system
-
-<!-- tắt title bar mặc định và tự vẽ thanh title bar với các nút giống như mặc định (Minimize, Maximize, Close) nhưng thêm Custom button. (lưu ý các nút ) phải hoạt động giống như mặc định, ví dụ: Minimize thì thu nhỏ app xuống taskbar, Maximize thì phóng to app lên full screen, Close thì đóng app. Custom button thì sẽ mở một menu nhỏ với các tùy chọn như "Settings", "Help", "About". Menu này sẽ xuất hiện ngay dưới Custom button khi người dùng click vào nó. Ngoài ra, giao diện của thanh title bar và các nút phải được thiết kế sao cho hài hòa với giao diện tổng thể của ứng dụng, có thể sử dụng màu sắc và kiểu dáng phù hợp để tạo sự đồng nhất. -->

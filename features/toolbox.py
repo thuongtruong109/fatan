@@ -288,6 +288,7 @@ class ToolboxWidget(QWidget):
         ("⚡", "Fastboot",    "fastboot",   "#f57f17"),
         ("🔴", "EDL",         "edl",        "#c62828"),
         ("🔒", "Safe Mode",   "safemode",   "#546e7a"),
+        ("⬇️", "Odin Boot",   "download",   "#0288d1"),
     ]
 
     def __init__(self, parent: QWidget | None = None):

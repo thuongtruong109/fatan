@@ -617,6 +617,7 @@ class DashboardWidget(QWidget):
             self._diag_run_top()
             self._diag_run_df()
             self._diag_run_procrank()
+            self._diag_run_disk()
             # Start real-time top worker
             self._start_top_worker()
             # Auto-start live metrics refresh
@@ -998,6 +999,51 @@ class DashboardWidget(QWidget):
         top_group.setLayout(top_vl)
         inner_vl.addWidget(top_group)
 
+        # ── Disk Info ─────────────────────────────────────────────────────
+        disk_group = QGroupBox("💽 Disk")
+        disk_group.setStyleSheet(_GROUP_SS)
+        disk_vl = QVBoxLayout()
+        disk_vl.setContentsMargins(10, 10, 10, 10)
+        disk_vl.setSpacing(6)
+
+        disk_btn_row = QHBoxLayout()
+        disk_btn_row.setSpacing(6)
+        disk_refresh_btn = QPushButton("🔄 Refresh Disk")
+        disk_refresh_btn.setFixedHeight(28)
+        disk_refresh_btn.setStyleSheet(
+            "QPushButton { border:1px solid #bdbdbd; border-radius:4px;"
+            " padding:2px 10px; background:#f0f0f0; font-size:11px; }"
+            "QPushButton:hover { background:#e0e0e0; }"
+        )
+        disk_refresh_btn.clicked.connect(self._diag_run_disk)
+        disk_btn_row.addWidget(disk_refresh_btn)
+        disk_btn_row.addStretch()
+        disk_vl.addLayout(disk_btn_row)
+
+        self._disk_table = QTableWidget()
+        self._disk_table.setColumnCount(6)
+        self._disk_table.setHorizontalHeaderLabels(
+            ["Filesystem", "1K-blocks", "Used", "Available", "Use%", "Mounted on"]
+        )
+        self._disk_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._disk_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._disk_table.setAlternatingRowColors(True)
+        self._disk_table.verticalHeader().hide()
+        self._disk_table.setFixedHeight(220)
+        _dh = self._disk_table.horizontalHeader()
+        _dh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        _dh.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        for _ci in range(1, 5):
+            _dh.setSectionResizeMode(_ci, QHeaderView.ResizeMode.ResizeToContents)
+        self._disk_table.setStyleSheet(
+            "QTableWidget { font-size: 10px; gridline-color: #e0e0e0; font-family: Consolas, monospace; }"
+            "QHeaderView::section { font-weight: bold; background: #f0f0f0; font-size: 10px; }"
+        )
+        disk_vl.addWidget(self._disk_table)
+
+        disk_group.setLayout(disk_vl)
+        inner_vl.addWidget(disk_group)
+
         # Keep references for use in methods
         self._DonutRow = _DonutRow
         self._MetricsWorker = _MetricsWorker
@@ -1084,6 +1130,7 @@ class DashboardWidget(QWidget):
         self._diag_run_top()
         self._diag_run_df()
         self._diag_run_procrank()
+        self._diag_run_disk()
 
     def _diag_run_free(self):
         if not self._serial:
@@ -1140,6 +1187,67 @@ class DashboardWidget(QWidget):
                         chart.setVisible(False)
         except Exception:
             pass
+
+    def _diag_run_disk(self):
+        """Populate the Disk table using `adb shell df`."""
+        if not self._serial:
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["adb", "-s", self._serial, "shell", "df"],
+                startupinfo=_si, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            output = (r.stdout or r.stderr or "").strip()
+            self._populate_disk_table(output)
+        except Exception:
+            pass
+
+    def _populate_disk_table(self, output: str):
+        """Parse `adb shell df` output and fill the disk table.
+
+        Expected header:
+          Filesystem       1K-blocks    Used Available Use% Mounted on
+        """
+        self._disk_table.setRowCount(0)
+        lines = output.splitlines()
+        # Skip header line(s)
+        data_lines = [l for l in lines if l.strip() and not l.strip().startswith("Filesystem")]
+        for line in data_lines:
+            parts = line.split()
+            # A line may be split across two lines when filesystem name is long;
+            # valid data lines should have at least 6 fields.
+            if len(parts) < 6:
+                continue
+            filesystem  = parts[0]
+            blocks_1k   = parts[1]
+            used        = parts[2]
+            available   = parts[3]
+            use_pct     = parts[4]
+            mounted_on  = parts[5] if len(parts) > 5 else ""
+
+            ri = self._disk_table.rowCount()
+            self._disk_table.insertRow(ri)
+            values = [filesystem, blocks_1k, used, available, use_pct, mounted_on]
+            for ci, val in enumerate(values):
+                item = QTableWidgetItem(val)
+                # Colour Use% column by usage level
+                if ci == 4:
+                    try:
+                        pct = int(val.rstrip("%"))
+                        if pct >= 90:
+                            item.setForeground(QColor("#c62828"))
+                        elif pct >= 70:
+                            item.setForeground(QColor("#e65100"))
+                    except ValueError:
+                        pass
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                elif ci in (1, 2, 3):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self._disk_table.setItem(ri, ci, item)
 
     # ── Live Device Metrics helpers ───────────────────────────────────────
 

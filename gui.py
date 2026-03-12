@@ -31,6 +31,8 @@ from features.packages import PackageWidget
 from features.files import FilesWidget
 from features.activities import ActivitiesWidget
 from features.toolbox import ToolboxWidget
+from features.titlebar import TitleBar
+from features.services import ServicesWidget
 
 class Worker(QThread):
     progress = Signal(str)
@@ -290,8 +292,23 @@ class CookieLoaderGUI(QWidget):
         self.setWindowTitle(self.app_name)
         self.setGeometry(300, 300, 940, 600)
         self.setWindowIcon(QIcon(self.icon))
+        # Remove OS title bar – we draw our own
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
 
-        layout = QHBoxLayout()
+        # ── Outer wrapper: title bar on top, content below ───────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.title_bar = TitleBar(self, title=self.app_name, icon_path=self.icon)
+        self.title_bar.menu_settings_clicked.connect(lambda: self._open_tab(2))
+        self.title_bar.menu_help_clicked.connect(self._show_help)
+        # menu_about_clicked is handled internally by TitleBar (opens AboutDialog)
+        outer.addWidget(self.title_bar)
+
+        # Content widget holds the original horizontal layout
+        content_widget = QWidget()
+        layout = QHBoxLayout(content_widget)
         layout.setSpacing(0)
 
         # Create widgets that are always needed
@@ -332,6 +349,9 @@ class CookieLoaderGUI(QWidget):
         self.toolbox_widget.install_gmail_requested.connect(self.install_gmail_for_all)
         self.toolbox_widget.install_socksdroid_requested.connect(self.install_socksdroid_for_all)
         self.toolbox_widget._get_serials_fn = self._collect_serials
+
+        self.services_widget = ServicesWidget()
+        self.services_widget.status_update.connect(self.update_status)
 
         # Preview panel (hidden by default)
         self.preview_panel = QWidget()
@@ -448,6 +468,10 @@ class CookieLoaderGUI(QWidget):
         self.toolbox_button = _nav_btn('🛠 Toolbox')
         self.toolbox_button.clicked.connect(lambda: self._open_tab(8))
         left_layout.addWidget(self.toolbox_button)
+
+        self.services_button = _nav_btn('⚙ Services')
+        self.services_button.clicked.connect(lambda: self._open_tab(9))
+        left_layout.addWidget(self.services_button)
 
         self.run_ads_button = QPushButton('▶ Run Ads')
         self.run_ads_button.clicked.connect(self.run_ads_for_all)
@@ -694,12 +718,17 @@ class CookieLoaderGUI(QWidget):
         # Page 8 – Toolbox      # index 8
         self.tab_body.addWidget(self.toolbox_widget)
 
+        # Page 9 – Services     # index 9
+        self.tab_body.addWidget(self.services_widget)
+
         right_layout.addWidget(self.tab_body)
 
         layout.addWidget(left_panel)
         layout.addWidget(right_panel, 1)
         layout.addWidget(self.preview_panel)
-        self.setLayout(layout)
+
+        outer.addWidget(content_widget, 1)
+        self.setLayout(outer)
 
         # Wire table row selection → update Info / Actions with selected serial
         self.ads_table.table.itemSelectionChanged.connect(self._on_table_selection_changed)
@@ -713,12 +742,14 @@ class CookieLoaderGUI(QWidget):
     def update_status(self, text):
         if text:
             self.setWindowTitle(f'{self.app_name} - {text}')
+            self.title_bar.set_title(f'{self.app_name}  –  {text}')
             self.status_timer.start(5000)
         else:
             self.reset_window_title()
 
     def reset_window_title(self):
         self.setWindowTitle(self.app_name)
+        self.title_bar.set_title(self.app_name)
 
     # TAB_INDEX: 0=Simulator, 1=Proxy, 2=Settings, 3=Info, 4=Actions, 5=Packages, 6=Files, 7=Activities
     def _open_tab(self, index: int):
@@ -739,9 +770,26 @@ class CookieLoaderGUI(QWidget):
             self.files_button,
             self.activities_button,
             self.toolbox_button,
+            self.services_button,
         ]
         self.current_active_tab = _tab_buttons[index]
         self.current_active_tab.setChecked(True)
+
+    def _show_help(self):
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Help")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            "<b>Fatan – ADB Automation Tool</b><br><br>"
+            "1. Connect Android devices via USB / WiFi ADB.<br>"
+            "2. Click <b>🔃 Load devices</b> to detect them.<br>"
+            "3. Select a device row to inspect or control it.<br>"
+            "4. Use the <b>Simulator</b> tab to run ads automation.<br>"
+            "5. Use <b>Actions / Packages / Files</b> for device control.<br>"
+            "6. Check the <b>Services</b> tab to inspect running Binder services."
+        )
+        msg.exec()
 
     def on_worker_finished(self, message):
         self.update_status(message)
@@ -814,6 +862,7 @@ class CookieLoaderGUI(QWidget):
         self.files_widget.set_device(serial)
         self.activities_widget.set_selected_serial(serial)
         self.toolbox_widget.set_device(serial)
+        self.services_widget.set_device(serial)
 
         # Only auto-load Info if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:
@@ -837,6 +886,8 @@ class CookieLoaderGUI(QWidget):
             self.apps_widget.load_device(self.apps_widget._serial)
         elif index == 6 and self.files_widget._serial:
             self.files_widget.load_device(self.files_widget._serial)
+        elif index == 9 and self.services_widget._serial:
+            self.services_widget.load_device()
 
     def stop_ads(self):
         """Signal the running worker to stop after the current device."""
