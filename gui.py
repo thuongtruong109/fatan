@@ -387,6 +387,7 @@ class CookieLoaderGUI(QWidget):
         self.apps_widget = PackageWidget()
         self.apps_widget.status_update.connect(self.update_status)
         self.apps_widget.install_chrome_requested.connect(self.install_chrome_for_all)
+        self.apps_widget.set_install_serials_provider(self._collect_serials)
         self.files_widget = FilesWidget()
         self.files_widget.status_update.connect(self.update_status)
 
@@ -729,8 +730,9 @@ class CookieLoaderGUI(QWidget):
         frame_vl.addWidget(content_widget, 1)
         self.setLayout(outer)
 
-        # Wire table row focus → update Dashboard / Actions / Packages / Files / Activities / Services
+        # Wire table selection changes to tab-specific device selection models
         self.ads_table.focused_serial_changed.connect(self._on_focused_serial_changed)
+        self.ads_table.checked_serials_changed.connect(self._on_checked_serials_changed)
 
         # Auto-load Info when the user switches to the Info tab
         self.tab_body.currentChanged.connect(self._on_tab_changed)
@@ -847,18 +849,15 @@ class CookieLoaderGUI(QWidget):
 
     def _on_focused_serial_changed(self, serial: str):
         """When the user clicks a row, push the serial to focus-based tabs (Dashboard,
-        Actions, Packages, Files, Activities, Services). At most one device at a time."""
-        if not serial:
-            return
-
+        Packages, Activities, Services). At most one device at a time."""
         # Always keep focus-based tabs in sync
-        self.actions_widget.set_device(serial)
         self.info_widget.set_device(serial)
         self.apps_widget.set_device(serial)
-        self.files_widget.set_device(serial)
         self.activities_widget.set_selected_serial(serial)
-        self.toolbox_widget.set_device(serial)
         self.services_widget.set_device(serial)
+
+        if not serial:
+            return
 
         # Only auto-load if that tab is currently open
         if self.tab_body.isVisible() and self.tab_body.currentIndex() == 3:
@@ -873,6 +872,19 @@ class CookieLoaderGUI(QWidget):
             self.info_widget._serial_label.setText(
                 f"Serial: {serial}" if serial else "No device selected"
             )
+
+    def _on_checked_serials_changed(self, serials: list[str]):
+        """Sync checkbox-based tabs to checkbox selection."""
+        serial = serials[0] if serials else ""
+        self.actions_widget.set_device(serial)
+        self.files_widget.set_device(serial)
+        self.toolbox_widget.set_device(serial)
+
+        if self.tab_body.isVisible() and self.tab_body.currentIndex() == 6:
+            if serial:
+                self.files_widget.load_device(serial)
+            else:
+                self.files_widget.set_device("")
 
     def _on_tab_changed(self, index: int):
         """When the user switches to the Info or Apps tab, trigger a load if a device is set."""
