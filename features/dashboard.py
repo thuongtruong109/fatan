@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
+from features.widgets.wifi import WifiWidget
 
-# ── ADB bootstrap ────────────────────────────────────────────────────────
 _si = subprocess.STARTUPINFO()
 _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
@@ -144,10 +144,9 @@ class _FetchWorker(QThread):
     result = Signal(dict)
     error  = Signal(str)
 
-    def __init__(self, serial: str, manual_wifi: str = ""):
+    def __init__(self, serial: str):
         super().__init__()
         self.serial = serial
-        self.manual_wifi = manual_wifi
 
     def run(self):
         try:
@@ -294,83 +293,29 @@ class _FetchWorker(QThread):
                         phone = candidate
                         break
 
-            # ── GPS location ──────────────────────────────────────────────
-            lat = lon = ""
-            loc = _shell(s, "dumpsys location", timeout=8)
-
-            # Strategy 1: Look for "last known location" blocks with lat/lng
-            # Android 9+: "mLastKnownLocation: Location[network X.XXX,Y.YYY ...]"
-            # Android 11+: "last location=Location[gps lat=X.XX lng=Y.YY ...]"
-            for lat_pat, lon_pat in [
-                # "lat=12.345 lng=67.890" or "lat=12.345,lon=67.890"
-                (r"lat\s*=\s*([-\d.]+)", r"l(?:ng|on)\s*=\s*([-\d.]+)"),
-                # "Location[gps 12.345,67.890 ...]"
-                (r"Location\[\w[\w\s]*?([-\d.]+),([-\d.]+)", None),
-                # generic latitude/longitude= lines
-                (r"latitude\s*[=:]\s*([-\d.]+)", r"longitude\s*[=:]\s*([-\d.]+)"),
-            ]:
-                if lon_pat is None:
-                    # combined pattern (lat and lon in same group)
-                    m = re.search(lat_pat, loc, re.IGNORECASE | re.DOTALL)
-                    if m:
-                        lat, lon = m.group(1), m.group(2)
-                        break
-                else:
-                    ml = re.search(lat_pat, loc, re.IGNORECASE | re.DOTALL)
-                    mo = re.search(lon_pat, loc, re.IGNORECASE | re.DOTALL)
-                    if ml and mo:
-                        lat, lon = ml.group(1), mo.group(1)
-                        break
-
-            # Strategy 2: Try dumpsys location providers directly
-            if not lat:
-                for provider in ("gps", "network", "fused"):
-                    prov_out = _shell(s, f"dumpsys location | grep -A 5 'last location'", timeout=6)
-                    m_lat = re.search(r"lat(?:itude)?\s*[=:]\s*([-\d.]+)", prov_out, re.IGNORECASE)
-                    m_lon = re.search(r"l(?:ng|on)(?:gitude)?\s*[=:]\s*([-\d.]+)", prov_out, re.IGNORECASE)
-                    if m_lat and m_lon:
-                        lat, lon = m_lat.group(1), m_lon.group(1)
-                        break
-
-            # Strategy 3: Try reading last known location via content provider (Android 8+)
-            if not lat:
-                try:
-                    gps_raw = _shell(s,
-                        "content query --uri content://com.google.android.gsf.gservices/prefix --where \"name='location'\" 2>/dev/null | head -5",
-                        timeout=5)
-                    m_lat = re.search(r"lat(?:itude)?\s*[=:]\s*([-\d.]+)", gps_raw, re.IGNORECASE)
-                    m_lon = re.search(r"l(?:ng|on)(?:gitude)?\s*[=:]\s*([-\d.]+)", gps_raw, re.IGNORECASE)
-                    if m_lat and m_lon:
-                        lat, lon = m_lat.group(1), m_lon.group(1)
-                except Exception:
-                    pass
-
             # ── WiFi SSID ─────────────────────────────────────────────────
             wifi_name = ""
-            if self.manual_wifi:
-                wifi_name = self.manual_wifi
-            else:
-                # wpa_supplicant (most reliable)
-                wpa = _shell(s, "wpa_cli -i wlan0 status 2>/dev/null || wpa_cli status 2>/dev/null", timeout=5)
-                m = re.search(r"^ssid=(.+)$", wpa, re.MULTILINE)
-                if m:
-                    wifi_name = m.group(1).strip()
-                # dumpsys wifi
-                if not wifi_name or wifi_name == "<unknown ssid>":
-                    wifi_raw = _shell(s, "dumpsys wifi | grep -E 'SSID|mWifiInfo' | head -5", timeout=6)
-                    m2 = re.search(r'SSID:\s*"?([^",\n<>]{2,})"?', wifi_raw)
-                    if not m2:
-                        m2 = re.search(r'SSID\s*=\s*"?([^",\n<>]{2,})"?', wifi_raw)
-                    if m2:
-                        wifi_name = m2.group(1).strip()
-                # cmd wifi (Android 11+)
-                if not wifi_name or wifi_name == "<unknown ssid>":
-                    cmd_out = _shell(s, "cmd wifi status 2>/dev/null | grep -i ssid | head -2", timeout=5)
-                    m3 = re.search(r'SSID[=:\s]+"?([^",\n<>]{2,})"?', cmd_out, re.IGNORECASE)
-                    if m3:
-                        wifi_name = m3.group(1).strip()
-                if wifi_name in ("<unknown ssid>", "0x", ""):
-                    wifi_name = ""
+            # wpa_supplicant (most reliable)
+            wpa = _shell(s, "wpa_cli -i wlan0 status 2>/dev/null || wpa_cli status 2>/dev/null", timeout=5)
+            m = re.search(r"^ssid=(.+)$", wpa, re.MULTILINE)
+            if m:
+                wifi_name = m.group(1).strip()
+            # dumpsys wifi
+            if not wifi_name or wifi_name == "<unknown ssid>":
+                wifi_raw = _shell(s, "dumpsys wifi | grep -E 'SSID|mWifiInfo' | head -5", timeout=6)
+                m2 = re.search(r'SSID:\s*"?([^",\n<>]{2,})"?', wifi_raw)
+                if not m2:
+                    m2 = re.search(r'SSID\s*=\s*"?([^",\n<>]{2,})"?', wifi_raw)
+                if m2:
+                    wifi_name = m2.group(1).strip()
+            # cmd wifi (Android 11+)
+            if not wifi_name or wifi_name == "<unknown ssid>":
+                cmd_out = _shell(s, "cmd wifi status 2>/dev/null | grep -i ssid | head -2", timeout=5)
+                m3 = re.search(r'SSID[=:\s]+"?([^",\n<>]{2,})"?', cmd_out, re.IGNORECASE)
+                if m3:
+                    wifi_name = m3.group(1).strip()
+            if wifi_name in ("<unknown ssid>", "0x", ""):
+                wifi_name = ""
 
             # ── Uptime ────────────────────────────────────────────────────
             uptime = _shell(s, "uptime")
@@ -412,6 +357,9 @@ class _FetchWorker(QThread):
             ]
             extra_props = {k: props.get(k, "") for k in _EXTRA_PROPS}
 
+            from utils.fn import get_location
+            loc = get_location()
+
             self.result.emit({
                 "brand":         brand,
                 "model":         model,
@@ -429,8 +377,8 @@ class _FetchWorker(QThread):
                 "subscriber_id":      subscriber_id,
                 "subscription_index": subscription_index,
                 "phone_number":       phone,
-                "latitude":           lat,
-                "longitude":          lon,
+                "latitude":           loc["lat"],
+                "longitude":          loc["long"],
                 "wifi_name":          wifi_name,
                 "uptime":             uptime,
                 "extra_props":        extra_props,
@@ -679,16 +627,7 @@ class DashboardWidget(QWidget):
         self._set_state("loading")
         self._refresh_btn.setEnabled(False)
 
-        manual_wifi = (
-            self._wifi_manual_input.text().strip()
-            if self._manual_wifi_cb.isChecked() else ""
-        )
-
-        if self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(500)
-
-        self._worker = _FetchWorker(serial, manual_wifi=manual_wifi)
+        self._worker = _FetchWorker(serial)
         self._worker.result.connect(self._on_result)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(lambda: self._refresh_btn.setEnabled(True))
@@ -799,26 +738,15 @@ class DashboardWidget(QWidget):
         f3.addRow(_lbl("📍 Latitude"),  self._f_lat)
         f3.addRow(_lbl("📍 Longitude"), self._f_lon)
 
-        # WiFi row with manual checkbox
+        # WiFi row
         wifi_row = QHBoxLayout()
         wifi_row.setSpacing(6)
         wifi_row.addWidget(self._f_wifi, 1)
-        self._manual_wifi_cb = QCheckBox("Manual")
-        self._manual_wifi_cb.setStyleSheet("font-size: 11px;")
-        self._manual_wifi_cb.toggled.connect(self._on_manual_wifi_toggled)
-        wifi_row.addWidget(self._manual_wifi_cb)
         wifi_w = QWidget()
         wifi_w.setLayout(wifi_row)
         f3.addRow(_lbl("📶 WiFi Name"), wifi_w)
 
-        self._wifi_manual_input = QLineEdit()
-        self._wifi_manual_input.setPlaceholderText("Enter Wifi name manually…")
-        self._wifi_manual_input.setStyleSheet(_FIELD_SS)
-        self._wifi_manual_input.hide()
-        self._wifi_manual_input.returnPressed.connect(
-            lambda: self.load_device(self._serial)
-        )
-        f3.addRow(QLabel(""), self._wifi_manual_input)
+
 
         # ── 2-column top layout: Device Info (left) | SIM + Location (right) ──
         top_cols = QHBoxLayout()
@@ -910,6 +838,14 @@ class DashboardWidget(QWidget):
         props_vl.addLayout(props_grid)
         props_group.setLayout(props_vl)
         inner_vl.addWidget(props_group)
+
+        # -- Wifi Section --
+        wifi_group = QGroupBox("📶 Wifi")
+        wifi_group.setStyleSheet(_GROUP_SS)
+        wifi_layout = QVBoxLayout(wifi_group)
+        self.wifi_widget = WifiWidget()
+        wifi_layout.addWidget(self.wifi_widget)
+        inner_vl.addWidget(wifi_group)
 
         # ── Live Device Metrics ───────────────────────────────────────────
         metrics_group = QGroupBox("📈 Live Device Metrics")
@@ -1155,12 +1091,6 @@ class DashboardWidget(QWidget):
         ]
 
     # ── Helpers ──────────────────────────────────────────────────────────
-    def _on_manual_wifi_toggled(self, checked: bool):
-        self._wifi_manual_input.setVisible(checked)
-        if checked:
-            self._wifi_manual_input.setFocus()
-        else:
-            self._wifi_manual_input.clear()
 
     def _set_state(self, state: str):
         """state: 'loading' | 'error' | 'clear'"""
@@ -1203,16 +1133,15 @@ class DashboardWidget(QWidget):
             (self._f_lon,          "longitude"),
         ]
         for field, key in pairs:
-            field.setText(data.get(key, ""))
+            field.setText(str(data.get(key, "")))
             field.setStyleSheet(_FIELD_SS)
-        if not self._manual_wifi_cb.isChecked():
-            self._f_wifi.setText(data.get("wifi_name", ""))
-            self._f_wifi.setStyleSheet(_FIELD_SS)
+        self._f_wifi.setText(data.get("wifi_name", ""))
+        self._f_wifi.setStyleSheet(_FIELD_SS)
 
         # ── Populate Properties section ────────────────────────────────
         extra_props = data.get("extra_props", {})
         for prop_key, le in self._prop_fields.items():
-            le.setText(extra_props.get(prop_key, ""))
+            le.setText(str(extra_props.get(prop_key, "")))
             le.setStyleSheet(_FIELD_SS)
 
     def _on_error(self, msg: str):

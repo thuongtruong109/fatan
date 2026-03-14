@@ -377,6 +377,7 @@ class AdsTableWidget(QWidget):
 
     status_update = Signal(str)
     focused_serial_changed = Signal(str)  # emitted when a row is clicked (single focus)
+    checked_serials_changed = Signal(list)  # emitted when checkbox selection changes
 
     def __init__(self, data_csv="data/data.csv", parent=None):
         super().__init__(parent)
@@ -1210,29 +1211,25 @@ class AdsTableWidget(QWidget):
             self.table.setItem(row_idx, 5, h_item)
         self.table.blockSignals(False)
 
-    def get_table_data(self):
-        """Get table data for worker operations.
-        If any devices are checked, returns only checked devices.
-        If none are checked, returns all devices (backward compatible).
-        """
+    def get_checked_table_data(self):
+        """Return only checkbox-selected devices."""
         checked = []
-        all_data = []
         row_count = self.table.rowCount()
         for row in range(row_count):
             serial_item = self.table.item(row, 3)
             serial = serial_item.text() if serial_item else ""
-            entry = {'serial': serial, 'row_index': row}
-            all_data.append(entry)
             chk = self.table.item(row, 0)
             if chk and chk.checkState() == Qt.CheckState.Checked:
-                checked.append(entry)
-        return checked if checked else all_data
+                checked.append({'serial': serial, 'row_index': row})
+        return checked
+
+    def get_table_data(self):
+        """Get table data for worker operations (checkbox selection only)."""
+        return self.get_checked_table_data()
 
     def get_selected_serials(self):
-        """Return list of serials for checked devices only.
-        If none checked, returns all serials.
-        """
-        return [d['serial'] for d in self.get_table_data() if d['serial']]
+        """Return list of serials for checked devices only."""
+        return [d['serial'] for d in self.get_checked_table_data() if d['serial']]
 
     def _on_header_checkbox_changed(self, state: Qt.CheckState):
         """Check/uncheck all device checkboxes when header checkbox is clicked."""
@@ -1261,6 +1258,8 @@ class AdsTableWidget(QWidget):
         else:
             self._select_count_label.setText(f"{count}/{total} selected")
             self._header.set_check_state(Qt.CheckState.PartiallyChecked)
+
+        self.checked_serials_changed.emit(self.get_selected_serials())
 
     def get_devices_with_model(self):
         try:

@@ -141,10 +141,14 @@ class _AppActionWorker(QThread):
     progress = Signal(str)
     finished = Signal(str)
 
-    def __init__(self, serial: str, action: str, packages: list[str],
+    def __init__(self, serial: str | list[str], action: str, packages: list[str],
                  apk_path: str = "", reinstall: bool = False):
         super().__init__()
-        self.serial = serial
+        if isinstance(serial, list):
+            self.serials = [s for s in serial if s]
+        else:
+            self.serials = [serial] if serial else []
+        self.serial = self.serials[0] if self.serials else ""
         self.action = action
         self.packages = packages
         self.apk_path = apk_path
@@ -155,50 +159,60 @@ class _AppActionWorker(QThread):
         if self.action == "install_apk":
             apk = self.apk_path
             ext = os.path.splitext(apk)[1].lower()
-            self.progress.emit(f"📦 Installing {os.path.basename(apk)}…")
+            targets = self.serials or ([self.serial] if self.serial else [])
+            if not targets:
+                self.finished.emit("❌ No selected device for APK install")
+                return
 
+            extracted = None
+            tmp_dir = None
             if ext == ".xapk" or ext == ".apkm":
-                # XAPK / APKM are ZIP archives containing split APKs
                 tmp_dir = tempfile.mkdtemp(prefix="xapk_")
                 try:
                     with zipfile.ZipFile(apk, "r") as z:
                         apk_files = [n for n in z.namelist() if n.endswith(".apk")]
                         if not apk_files:
-                            results.append(f"❌ No APK files found inside XAPK archive")
-                        else:
-                            z.extractall(tmp_dir, members=apk_files)
-                            extracted = [os.path.join(tmp_dir, n) for n in apk_files]
-                            flags = ["-r"] if self.reinstall else []
-                            r = subprocess.run(
-                                ["adb", "-s", self.serial, "install-multiple"] + flags + extracted,
-                                startupinfo=_si, capture_output=True, text=True, timeout=180,
-                            )
-                            out = (r.stdout + r.stderr).strip()
-                            if "Success" in out:
-                                results.append(f"✅ Installed (XAPK) {os.path.basename(apk)}")
-                            else:
-                                results.append(f"❌ Install failed: {out[:200]}")
+                            self.finished.emit("❌ No APK files found inside XAPK archive")
+                            return
+                        z.extractall(tmp_dir, members=apk_files)
+                        extracted = [os.path.join(tmp_dir, n) for n in apk_files]
                 except zipfile.BadZipFile:
-                    results.append(f"❌ Invalid XAPK file (not a valid ZIP archive)")
+                    self.finished.emit("❌ Invalid XAPK file (not a valid ZIP archive)")
+                    return
                 except Exception as e:
-                    results.append(f"❌ XAPK install error: {e}")
-                finally:
-                    import shutil as _shutil
-                    try:
-                        _shutil.rmtree(tmp_dir, ignore_errors=True)
-                    except Exception:
-                        pass
-            else:
-                flags = ["-r"] if self.reinstall else []
-                r = subprocess.run(
-                    ["adb", "-s", self.serial, "install"] + flags + [apk],
-                    startupinfo=_si, capture_output=True, text=True, timeout=120,
-                )
-                out = (r.stdout + r.stderr).strip()
-                if "Success" in out:
-                    results.append(f"✅ Installed {os.path.basename(apk)}")
+                    self.finished.emit(f"❌ XAPK install error: {e}")
+                    return
+
+            flags = ["-r"] if self.reinstall else []
+            for target in targets:
+                self.progress.emit(f"📦 Installing {os.path.basename(apk)} on {target}…")
+                if extracted is not None:
+                    r = subprocess.run(
+                        ["adb", "-s", target, "install-multiple"] + flags + extracted,
+                        startupinfo=_si, capture_output=True, text=True, timeout=180,
+                    )
+                    out = (r.stdout + r.stderr).strip()
+                    if "Success" in out:
+                        results.append(f"✅ [{target}] Installed (XAPK) {os.path.basename(apk)}")
+                    else:
+                        results.append(f"❌ [{target}] Install failed: {out[:200]}")
                 else:
-                    results.append(f"❌ Install failed: {out[:200]}")
+                    r = subprocess.run(
+                        ["adb", "-s", target, "install"] + flags + [apk],
+                        startupinfo=_si, capture_output=True, text=True, timeout=120,
+                    )
+                    out = (r.stdout + r.stderr).strip()
+                    if "Success" in out:
+                        results.append(f"✅ [{target}] Installed {os.path.basename(apk)}")
+                    else:
+                        results.append(f"❌ [{target}] Install failed: {out[:200]}")
+
+            if tmp_dir:
+                import shutil as _shutil
+                try:
+                    _shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
         else:
             for pkg in self.packages:
                 try:
@@ -308,6 +322,7 @@ class PackageWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._serial: str = ""
+        self._get_install_serials_fn = None
         self._list_worker: _ListAppsWorker | None = None
         self._action_worker: _AppActionWorker | None = None
         self._all_apps: list[tuple[str, bool, str]] = []
@@ -335,6 +350,10 @@ class PackageWidget(QWidget):
         self._serial = serial
         self._serial_label.setText(f"Serial: {serial}")
         self._start_list_apps()
+
+    def set_install_serials_provider(self, fn):
+        """Inject callback returning checkbox-selected serials for Install APK."""
+        self._get_install_serials_fn = fn
 
     # ── UI ────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -594,15 +613,36 @@ class PackageWidget(QWidget):
             self._apk_path_input.setText(path)
 
     def _install_apk(self):
-        if not self._serial:
+        targets = []
+        if callable(self._get_install_serials_fn):
+            try:
+                targets = [s for s in (self._get_install_serials_fn() or []) if s]
+            except Exception:
+                targets = []
+        if not targets and self._serial:
+            targets = [self._serial]
+        if not targets:
+            QMessageBox.warning(self, "No Device", "Please select at least one device by checkbox.")
             return
+
         apk = self._apk_path_input.text().strip()
         if not apk or not os.path.isfile(apk):
             QMessageBox.warning(self, "No APK", "Please select a valid APK file first.")
             return
+
         reinstall = self._overwrite_cb.isChecked()
+        if len(targets) > 1:
+            reply = QMessageBox.question(
+                self,
+                "Install APK",
+                f"Install on {len(targets)} selected devices?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         self._run_action_worker(
-            _AppActionWorker(self._serial, "install_apk", [], apk_path=apk,
+            _AppActionWorker(targets, "install_apk", [], apk_path=apk,
                              reinstall=reinstall)
         )
 
